@@ -46,6 +46,7 @@ export interface IClaudeSessionInfo {
   modified_at: number;
   created_at: number;
   preview: string;
+  cwd: string;
 }
 
 export interface IClaudeSessionList {
@@ -889,6 +890,19 @@ export class NBIAPI {
         })
         .catch(reason => {
           console.error(`Failed to list Claude sessions.\n${reason}`);
+          reject(reason);
+        });
+    });
+  }
+
+  static async listAllClaudeSessions(): Promise<IClaudeSessionInfo[]> {
+    return new Promise<IClaudeSessionInfo[]>((resolve, reject) => {
+      requestAPI<any>('claude-sessions/all', { method: 'GET' })
+        .then(data => {
+          resolve(data.sessions ?? []);
+        })
+        .catch(reason => {
+          console.error(`Failed to list all Claude sessions.\n${reason}`);
           reject(reason);
         });
     });

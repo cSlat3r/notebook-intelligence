@@ -15,6 +15,7 @@ import { buildResumeCommand, writeTextToClipboard } from '../utils';
 export interface IClaudeSessionPickerProps {
   onResume: (session: IClaudeSessionInfo) => void;
   onClose: () => void;
+  fetchSessions?: () => Promise<IClaudeSessionInfo[]>;
 }
 
 function formatTimestamp(epochSeconds: number): string {
@@ -58,7 +59,8 @@ export function ClaudeSessionPicker(
 
   useEffect(() => {
     let cancelled = false;
-    NBIAPI.listClaudeSessions()
+    const fetch = props.fetchSessions ?? (() => NBIAPI.listClaudeSessions());
+    fetch()
       .then(result => {
         if (cancelled) {
           return;
