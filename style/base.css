@@ -692,6 +692,135 @@ pre:has(.code-block-header) {
   color: var(--jp-error-color1);
 }
 
+/* Coding Agent launcher tile: Anthropic orange icon */
+.jp-LauncherCard[data-category='Coding Agent'] .jp-LauncherCard-icon svg,
+.jp-Launcher-sectionHeader svg[data-icon='notebook-intelligence:claude-icon'] {
+  color: #d97757;
+}
+
+/* Pin the Coding Agent section to the top of the launcher.
+   JupyterLab hardcodes Notebook/Console/Other as the first categories,
+   so we use flex order to visually promote our section above them. */
+.jp-Launcher-content {
+  display: flex !important;
+  flex-direction: column;
+}
+.jp-Launcher-cwd {
+  order: -2;
+}
+.jp-Launcher-section:has(.jp-LauncherCard[data-category='Coding Agent']) {
+  order: -1;
+}
+
+/* Claude Code session picker (used inside Dialog from launcher tile) */
+.nflx-claude-code-picker {
+  min-width: 480px;
+}
+
+.nflx-claude-code-picker-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.nflx-claude-code-picker-search {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 10px;
+  margin-bottom: 10px;
+  border: 1px solid var(--jp-border-color1);
+  border-radius: 4px;
+  background: var(--jp-layout-color1);
+  color: var(--jp-ui-font-color1);
+  font-size: var(--jp-ui-font-size1);
+}
+
+.nflx-claude-code-picker-list {
+  max-height: 380px;
+  overflow-y: auto;
+}
+
+.nflx-claude-code-picker-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 80px;
+  color: var(--jp-ui-font-color2);
+}
+
+.nflx-claude-code-picker-error {
+  color: var(--jp-error-color1);
+}
+
+.nflx-claude-code-picker-empty {
+  padding: 16px 0;
+  color: var(--jp-ui-font-color2);
+  text-align: center;
+  font-size: var(--jp-ui-font-size1);
+}
+
+.nflx-claude-code-picker-project {
+  margin-bottom: 8px;
+}
+
+.nflx-claude-code-picker-project-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--jp-ui-font-color2);
+  margin-bottom: 4px;
+  padding: 0 2px;
+}
+
+.nflx-claude-code-picker-session {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+  margin-bottom: 4px;
+  border: 1px solid var(--jp-border-color2);
+  border-radius: 4px;
+  cursor: pointer;
+  background: var(--jp-layout-color1);
+  transition: border-color 0.1s;
+}
+
+.nflx-claude-code-picker-session:hover,
+.nflx-claude-code-picker-session:focus {
+  border-color: var(--jp-brand-color1);
+  outline: none;
+}
+
+.nflx-claude-code-picker-session-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.nflx-claude-code-picker-session-id {
+  font-family: var(--jp-code-font-family);
+  font-size: 12px;
+  color: var(--jp-ui-font-color1);
+  font-weight: 600;
+}
+
+.nflx-claude-code-picker-time {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--jp-ui-font-color3);
+}
+
+.nflx-claude-code-picker-msg {
+  font-size: var(--jp-ui-font-size1);
+  color: var(--jp-ui-font-color2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .mode-tools-group {
   display: flex;
   flex-direction: column;
