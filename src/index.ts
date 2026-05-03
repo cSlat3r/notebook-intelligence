@@ -44,7 +44,7 @@ import { IStatusBar } from '@jupyterlab/statusbar';
 import { ILauncher } from '@jupyterlab/launcher';
 import React from 'react';
 import { ReactWidget } from '@jupyterlab/apputils';
-import { ClaudeSessionPicker } from './components/claude-session-picker';
+import { LauncherPicker } from './components/launcher-picker';
 import stripAnsi from 'strip-ansi';
 import {
   ChatSidebar,
@@ -54,7 +54,7 @@ import {
   InlinePromptWidget,
   RunChatCompletionType
 } from './chat-sidebar';
-import { NBIAPI, GitHubCopilotLoginStatus } from './api';
+import { NBIAPI, GitHubCopilotLoginStatus, IClaudeSessionInfo } from './api';
 import {
   BackendMessageType,
   GITHUB_COPILOT_PROVIDER_ID,
@@ -636,6 +636,7 @@ class MCPConfigEditor {
   private _isOpen = false;
 }
 
+
 /**
  * Initialization data for the @notebook-intelligence/notebook-intelligence extension.
  */
@@ -1044,46 +1045,85 @@ const plugin: JupyterFrontEndPlugin<INotebookIntelligence> = {
 
     // Claude Code launcher tile: shows a session picker backed by history.jsonl
     // (all projects), then opens a terminal at the session's project directory.
+
+    // Waits for bash's first prompt before sending, avoiding the race condition
+    // where the command is sent before the shell has started.
+    const launchClaudeInTerminal = async (command: string): Promise<void> => {
+      const mgr = app.serviceManager.terminals;
+      const before = new Set([...mgr.running()].map((s: any) => s.name));
+      try {
+        await app.commands.execute('terminal:create-new');
+      } catch {
+        return;
+      }
+      const newModel = [...mgr.running()].find((s: any) => !before.has(s.name));
+      if (!newModel) {
+        return;
+      }
+      const conn: any = mgr.connectTo({ model: newModel });
+      let sent = false;
+      const sendCommand = () => {
+        if (sent) {
+          return;
+        }
+        sent = true;
+        conn.messageReceived.disconnect(handler);
+        conn.send({ type: 'stdin', content: [command + '\r'] });
+      };
+      const handler = (_: any, msg: any) => {
+        if (msg.type === 'stdout') {
+          sendCommand();
+        }
+      };
+      conn.messageReceived.connect(handler);
+      setTimeout(sendCommand, 3000);
+    };
+
     app.commands.addCommand(CommandIDs.openClaudeCodeLauncher, {
       label: 'Claude Code',
       caption: 'Resume or start a Claude Code session',
       icon: claudeIcon,
-      execute: () => {
+      execute: async () => {
         class PickerWidget extends ReactWidget {
           getValue(): void {
             return;
           }
           render() {
-            return React.createElement(ClaudeSessionPicker, {
-              fetchSessions: () => NBIAPI.listAllClaudeSessions(),
-              onResume: (session: any) => {
+            return React.createElement(LauncherPicker, {
+              onSessionSelected: (session: IClaudeSessionInfo) => {
                 dialog.close();
-                app.commands.execute(CommandIDs.runCommandInTerminal, {
-                  command: `claude --resume ${session.session_id}`,
-                  cwd: session.cwd || undefined
-                });
-              },
-              onClose: () => dialog.close()
+                const cmd = session.cwd
+                  ? `cd ${session.cwd} && claude --resume ${session.session_id}`
+                  : `claude --resume ${session.session_id}`;
+                launchClaudeInTerminal(cmd);
+              }
             });
           }
         }
 
         const picker = new PickerWidget();
+        picker.addClass('nflx-claude-code-picker');
         const dialog = new Dialog({
-          title: '',
+          title: 'Claude Code',
           body: picker,
-          buttons: [],
-          hasClose: false
+          buttons: [
+            Dialog.cancelButton({ label: 'Cancel' }),
+            Dialog.okButton({ label: '＋ New Session' })
+          ],
+          hasClose: true
         });
-        dialog.launch();
+        const result = await dialog.launch();
+        if (result.button.accept) {
+          launchClaudeInTerminal('claude');
+        }
       }
     });
 
     if (launcher) {
       launcher.add({
         command: CommandIDs.openClaudeCodeLauncher,
-        category: 'Claude Code',
-        rank: 0
+        category: 'Coding Agent',
+        rank: -1
       });
     }
 
