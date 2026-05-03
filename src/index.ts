@@ -352,9 +352,7 @@ class ActiveDocumentWatcher {
   private static _languageRegistry: IEditorLanguageRegistry;
 }
 
-class NBIInlineCompletionProvider
-  implements IInlineCompletionProvider<IInlineCompletionItem>
-{
+class NBIInlineCompletionProvider implements IInlineCompletionProvider<IInlineCompletionItem> {
   constructor(telemetryEmitter: TelemetryEmitter) {
     this._telemetryEmitter = telemetryEmitter;
   }
@@ -1057,7 +1055,9 @@ const plugin: JupyterFrontEndPlugin<INotebookIntelligence> = {
       icon: claudeIcon,
       execute: () => {
         class PickerWidget extends ReactWidget {
-          getValue(): void { return; }
+          getValue(): void {
+            return;
+          }
           render() {
             return React.createElement(ClaudeSessionPicker, {
               fetchSessions: () => NBIAPI.listAllClaudeSessions(),
