@@ -50,7 +50,7 @@ import {
   InlinePromptWidget,
   RunChatCompletionType
 } from './chat-sidebar';
-import { NBIAPI, GitHubCopilotLoginStatus } from './api';
+import { CellOutputActionFlag, NBIAPI, GitHubCopilotLoginStatus } from './api';
 import { CellOutputHoverToolbar } from './cell-output-toolbar';
 import {
   BackendMessageType,
@@ -72,6 +72,7 @@ import claudeSvgstr from '../style/icons/claude.svg';
 import {
   applyCodeToSelectionInEditor,
   cellOutputAsText,
+  cellOutputHasError,
   compareSelections,
   extractLLMGeneratedCode,
   getSelectionInEditor,
@@ -1780,13 +1781,12 @@ const plugin: JupyterFrontEndPlugin<INotebookIntelligence> = {
       label: 'Fix code',
       isEnabled: () => isChatEnabled() && isActiveCellCodeCell()
     });
-    type OutputContextFlag = 'explain_error' | 'output_followup';
     const registerOutputContextCommand = (opts: {
       commandId: string;
       label: string;
       telemetryType: TelemetryEventType;
       autoSubmitPrompt?: string;
-      featureFlag?: OutputContextFlag;
+      featureFlag?: CellOutputActionFlag;
       requireError?: boolean;
     }) => {
       const isFlagOn = () =>
@@ -1844,12 +1844,11 @@ const plugin: JupyterFrontEndPlugin<INotebookIntelligence> = {
           if (!(activeCell instanceof CodeCell)) {
             return false;
           }
-          const outputs = activeCell.outputArea.model.toJSON();
-          if (!Array.isArray(outputs) || outputs.length === 0) {
+          if (activeCell.outputArea.model.length === 0) {
             return false;
           }
           if (opts.requireError) {
-            return outputs.some(o => o.output_type === 'error');
+            return cellOutputHasError(activeCell);
           }
           return true;
         },

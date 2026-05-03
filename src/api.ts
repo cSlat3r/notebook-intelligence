@@ -124,6 +124,24 @@ function claudeModelFromWire(wire: any): IClaudeModelInfo {
   };
 }
 
+export interface ICellOutputFeatureFlag {
+  enabled: boolean;
+  locked: boolean;
+}
+
+export interface ICellOutputFeatures {
+  explain_error: ICellOutputFeatureFlag;
+  output_followup: ICellOutputFeatureFlag;
+  output_toolbar: ICellOutputFeatureFlag;
+}
+
+// Per-action flags (the whole-toolbar gate `output_toolbar` is checked
+// separately by callers).
+export type CellOutputActionFlag = Exclude<
+  keyof ICellOutputFeatures,
+  'output_toolbar'
+>;
+
 export class NBIConfig {
   get userHomeDir(): string {
     return this.capabilities.user_home_dir;
@@ -220,11 +238,7 @@ export class NBIConfig {
     return this.capabilities.chat_feedback_enabled === true;
   }
 
-  get cellOutputFeatures(): {
-    explain_error: { enabled: boolean; locked: boolean };
-    output_followup: { enabled: boolean; locked: boolean };
-    output_toolbar: { enabled: boolean; locked: boolean };
-  } {
+  get cellOutputFeatures(): ICellOutputFeatures {
     const v = this.capabilities.cell_output_features ?? {};
     return {
       explain_error: {

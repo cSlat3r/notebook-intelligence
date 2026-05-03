@@ -109,6 +109,18 @@ export function formatJupyterError(output: any): string {
   return tb ? `${head}\n${tb}` : head;
 }
 
+// True when the output area contains at least one error output. Avoids the
+// full toJSON() serialization callers used to do for a 1-bit check.
+export function cellOutputHasError(cell: CodeCell): boolean {
+  const model = cell.outputArea.model;
+  for (let i = 0; i < model.length; i++) {
+    if (model.get(i).type === 'error') {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function cellOutputAsText(cell: CodeCell): string {
   let content = '';
   const outputs = cell.outputArea.model.toJSON();
@@ -121,8 +133,8 @@ export function cellOutputAsText(cell: CodeCell): string {
     } else if (output.output_type === 'stream') {
       content += output.text + '\n';
     } else if (output.output_type === 'error') {
-      // Preserve the existing behavior of skipping errors without a
-      // traceback array; the bundle formatter does include the head alone.
+      // Skip errors without a traceback to match historical behavior of this
+      // function; the head-only case is intentional here.
       if (Array.isArray(output.traceback)) {
         content += formatJupyterError(output) + '\n';
       }
@@ -138,22 +150,24 @@ export function getTokenCount(source: string): number {
 }
 
 // Encode once, slice the token array, decode back. Avoids the O(log n)
-// re-encoding a binary search would do on every truncation.
+// re-encoding a binary search would do on every truncation. Returns
+// `truncated: true` when the input exceeded the cap so callers don't need a
+// second `getTokenCount` pass to detect truncation.
 export function truncateToTokenCount(
   text: string,
   maxTokens: number
-): { text: string; size: number } {
+): { text: string; size: number; truncated: boolean } {
   if (maxTokens <= 0 || text.length === 0) {
-    return { text: '', size: 0 };
+    return { text: '', size: 0, truncated: text.length > 0 };
   }
   const tokens = tiktoken_encoding.encode(text);
   if (tokens.length <= maxTokens) {
-    return { text, size: tokens.length };
+    return { text, size: tokens.length, truncated: false };
   }
   const sliced = tokens.slice(0, maxTokens);
   const bytes = tiktoken_encoding.decode(sliced);
   const decoded = new TextDecoder('utf-8').decode(bytes);
-  return { text: decoded, size: sliced.length };
+  return { text: decoded, size: sliced.length, truncated: true };
 }
 
 export function compareSelectionPoints(

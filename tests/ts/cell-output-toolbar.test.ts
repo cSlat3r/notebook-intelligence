@@ -13,10 +13,24 @@ class FakeNotebookPanel {
 
 class FakeCodeCell {
   node: HTMLElement;
-  outputArea: { model: { toJSON: () => any[] } };
+  outputArea: {
+    model: {
+      toJSON: () => any[];
+      length: number;
+      get: (i: number) => { type: string };
+    };
+  };
   constructor(node: HTMLElement, outputs: any[] = []) {
     this.node = node;
-    this.outputArea = { model: { toJSON: () => outputs } };
+    this.outputArea = {
+      model: {
+        toJSON: () => outputs,
+        get length() {
+          return outputs.length;
+        },
+        get: (i: number) => ({ type: outputs[i]?.output_type })
+      }
+    };
   }
 }
 

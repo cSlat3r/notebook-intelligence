@@ -1,11 +1,7 @@
 // Copyright (c) Mehmet Bektas <mbektasgh@outlook.com>
 
 import { CodeCell } from '@jupyterlab/cells';
-import {
-  formatJupyterError,
-  getTokenCount,
-  truncateToTokenCount
-} from './utils';
+import { formatJupyterError, truncateToTokenCount } from './utils';
 import { IOutputContextItem } from './tokens';
 
 export const MAX_TOKENS_PER_OUTPUT = 4000;
@@ -48,11 +44,13 @@ export function cellOutputAsContextBundle(
   const remaining = (): number => Math.max(0, maxTurn - totalTokens);
 
   const pushBundle = (mimeType: string, data: string): void => {
-    let text = data;
-    let size = getTokenCount(text);
     const perOutCap = Math.min(maxOut, remaining());
-    if (size > perOutCap) {
-      ({ text, size } = truncateToTokenCount(text, perOutCap));
+    const {
+      text,
+      size,
+      truncated: didTruncate
+    } = truncateToTokenCount(data, perOutCap);
+    if (didTruncate) {
       truncated = true;
     }
     if (size === 0 && text.length === 0) {
