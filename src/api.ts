@@ -124,6 +124,24 @@ function claudeModelFromWire(wire: any): IClaudeModelInfo {
   };
 }
 
+export interface ICellOutputFeatureFlag {
+  enabled: boolean;
+  locked: boolean;
+}
+
+export interface ICellOutputFeatures {
+  explain_error: ICellOutputFeatureFlag;
+  output_followup: ICellOutputFeatureFlag;
+  output_toolbar: ICellOutputFeatureFlag;
+}
+
+// Per-action flags (the whole-toolbar gate `output_toolbar` is checked
+// separately by callers).
+export type CellOutputActionFlag = Exclude<
+  keyof ICellOutputFeatures,
+  'output_toolbar'
+>;
+
 export class NBIConfig {
   get userHomeDir(): string {
     return this.capabilities.user_home_dir;
@@ -151,6 +169,10 @@ export class NBIConfig {
 
   get chatModel(): any {
     return this.capabilities.chat_model;
+  }
+
+  get chatModelSupportsVision(): boolean {
+    return this.capabilities.chat_model_supports_vision === true;
   }
 
   get inlineCompletionModel(): any {
@@ -214,6 +236,24 @@ export class NBIConfig {
 
   get chatFeedbackEnabled(): boolean {
     return this.capabilities.chat_feedback_enabled === true;
+  }
+
+  get cellOutputFeatures(): ICellOutputFeatures {
+    const v = this.capabilities.cell_output_features ?? {};
+    return {
+      explain_error: {
+        enabled: v.explain_error?.enabled !== false,
+        locked: v.explain_error?.locked === true
+      },
+      output_followup: {
+        enabled: v.output_followup?.enabled !== false,
+        locked: v.output_followup?.locked === true
+      },
+      output_toolbar: {
+        enabled: v.output_toolbar?.enabled !== false,
+        locked: v.output_toolbar?.locked === true
+      }
+    };
   }
 
   capabilities: any = {};
