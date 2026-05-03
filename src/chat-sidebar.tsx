@@ -26,6 +26,7 @@ import {
   IChatCompletionResponseEmitter,
   IChatParticipant,
   IContextItem,
+  IOutputContextItem,
   ITelemetryEmitter,
   IToolSelections,
   RequestDataType,
@@ -73,9 +74,7 @@ export enum RunChatCompletionType {
   Chat,
   ExplainThis,
   FixThis,
-  GenerateCode,
-  ExplainThisOutput,
-  TroubleshootThisOutput
+  GenerateCode
 }
 
 export interface IRunChatCompletionRequest {
@@ -139,7 +138,10 @@ export interface IInlinePromptWidgetOptions {
   onRequestSubmitted: (prompt: string) => void;
   onRequestCancelled: () => void;
   onContentStream: (content: string) => void;
-  onContentStreamEnd: () => void;
+  // streamError is the backend's structured nbi_stream_error field, set
+  // when ClaudeChatModel.completions interrupts mid-stream. Auto-insert
+  // callers should skip applying generated content when it is non-null.
+  onContentStreamEnd: (streamError?: string | null) => void;
   onUpdatedCodeChange: (content: string) => void;
   onUpdatedCodeAccepted: () => void;
   telemetryEmitter: ITelemetryEmitter;
@@ -173,6 +175,12 @@ export class InlinePromptWidget extends ReactWidget {
 
   _onResponse(response: any) {
     if (response.type === BackendMessageType.StreamMessage) {
+      // Backend sets nbi_stream_error alongside the [Stream interrupted]
+      // marker delta. Capture it so onContentStreamEnd can tell the
+      // auto-insert path to skip writing the partial buffer.
+      if (typeof response.data?.nbi_stream_error === 'string') {
+        this._streamError = response.data.nbi_stream_error;
+      }
       const delta = response.data['choices']?.[0]?.['delta'];
       if (!delta) {
         return;
@@ -184,7 +192,8 @@ export class InlinePromptWidget extends ReactWidget {
       }
       this._options.onContentStream(responseMessage);
     } else if (response.type === BackendMessageType.StreamEnd) {
-      this._options.onContentStreamEnd();
+      this._options.onContentStreamEnd(this._streamError);
+      this._streamError = null;
       const timeElapsed =
         (new Date().getTime() - this._requestTime.getTime()) / 1000;
       this._options.telemetryEmitter.emitTelemetryEvent({
@@ -239,6 +248,7 @@ export class InlinePromptWidget extends ReactWidget {
 
   private _options: IInlinePromptWidgetOptions;
   private _requestTime: Date;
+  private _streamError: string | null = null;
 }
 
 export class GitHubCopilotStatusBarItem extends ReactWidget {
@@ -310,6 +320,12 @@ interface ISelectedContextFile {
   type: string;
   source?: 'workspace' | 'upload';
   serverPath?: string;
+  isImage?: boolean;
+  imageDataUrl?: string;
+  mimeType?: string;
+  outputContext?: IOutputContextItem;
+  cellIndex?: number;
+  notebookFilename?: string;
 }
 
 const MAX_ATTACHED_FILES = 10;
@@ -379,6 +395,15 @@ function readFileAsText(file: File): Promise<string> {
     reader.onload = () => resolve(reader.result as string);
     reader.onerror = () => reject(reader.error);
     reader.readAsText(file);
+  });
+}
+
+function readFileAsDataURL(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
   });
 }
 
@@ -931,9 +956,7 @@ async function submitCompletionRequest(
         responseEmitter
       );
     case RunChatCompletionType.ExplainThis:
-    case RunChatCompletionType.FixThis:
-    case RunChatCompletionType.ExplainThisOutput:
-    case RunChatCompletionType.TroubleshootThisOutput: {
+    case RunChatCompletionType.FixThis: {
       return NBIAPI.chatRequest(
         request.messageId,
         request.chatId,
@@ -949,6 +972,7 @@ async function submitCompletionRequest(
     }
     case RunChatCompletionType.GenerateCode:
       return NBIAPI.generateCode(
+        request.messageId,
         request.chatId,
         request.content,
         request.prefix || '',
@@ -1253,6 +1277,24 @@ function SidebarComponent(props: any) {
       };
     }
 
+    if (file.type.startsWith('image/')) {
+      const [imageDataUrl, { serverPath, filename }] = await Promise.all([
+        readFileAsDataURL(file),
+        NBIAPI.uploadFile(file)
+      ]);
+      return {
+        content: '',
+        lineCount: 0,
+        path: filename,
+        type: 'file',
+        source: 'upload',
+        serverPath,
+        isImage: true,
+        imageDataUrl,
+        mimeType: file.type
+      };
+    }
+
     const { serverPath, filename } = await NBIAPI.uploadFile(file);
     return {
       content: '',
@@ -1375,6 +1417,27 @@ function SidebarComponent(props: any) {
     const files = Array.from(event.target.files ?? []);
     event.target.value = '';
     await processAndAttachFiles(files);
+  };
+
+  const handlePaste = async (
+    event: React.ClipboardEvent<HTMLTextAreaElement>
+  ) => {
+    const items = Array.from(event.clipboardData.items);
+    const imageItem = items.find(item => item.type.startsWith('image/'));
+    if (!imageItem || !chatEnabled) {
+      return;
+    }
+    const file = imageItem.getAsFile();
+    if (!file) {
+      return;
+    }
+    event.preventDefault();
+    const ext = (imageItem.type.split('/')[1] ?? 'png').split('+')[0];
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const namedFile = new File([file], `screenshot-${timestamp}.${ext}`, {
+      type: imageItem.type
+    });
+    await processAndAttachFiles([namedFile]);
   };
 
   const cleanupRemovedToolsFromToolSelections = () => {
@@ -1947,13 +2010,21 @@ function SidebarComponent(props: any) {
     setShowModeTools(!showModeTools);
   };
 
-  const handleUserInputSubmit = async () => {
-    setPromptHistoryIndex(promptHistory.length + 1);
-    setPromptHistory([...promptHistory, prompt]);
+  const handleUserInputSubmit = async (options?: {
+    promptOverride?: string;
+    extraOutputContext?: ISelectedContextFile;
+  }) => {
+    const submitPrompt = options?.promptOverride ?? prompt;
+    const isAutoSubmit = options?.promptOverride !== undefined;
+
+    if (!isAutoSubmit) {
+      setPromptHistoryIndex(promptHistory.length + 1);
+      setPromptHistory([...promptHistory, prompt]);
+    }
     setShowPopover(false);
 
     const promptPrefixParts = [];
-    const promptParts = prompt.split(' ');
+    const promptParts = submitPrompt.split(' ');
     if (promptParts.length > 1) {
       for (let i = 0; i < Math.min(promptParts.length, 2); i++) {
         const part = promptParts[i];
@@ -1976,7 +2047,7 @@ function SidebarComponent(props: any) {
           {
             id: UUID.uuid4(),
             type: ResponseStreamDataType.Markdown,
-            content: prompt,
+            content: submitPrompt,
             created: new Date()
           }
         ]
@@ -1984,7 +2055,7 @@ function SidebarComponent(props: any) {
     ];
     setChatMessages(newList);
 
-    if (prompt.startsWith('/clear')) {
+    if (submitPrompt.startsWith('/clear')) {
       setChatMessages([]);
       setPrompt('');
       setSelectedContextFiles([]);
@@ -2004,7 +2075,7 @@ function SidebarComponent(props: any) {
     setCopilotRequestInProgress(true);
 
     const activeDocInfo: IActiveDocumentInfo = props.getActiveDocumentInfo();
-    const extractedPrompt = prompt;
+    const extractedPrompt = submitPrompt;
     const contents: IChatMessageContent[] = [];
     const app = props.getApp();
     const additionalContext: IContextItem[] = [];
@@ -2032,6 +2103,18 @@ function SidebarComponent(props: any) {
     }
 
     for (const file of selectedContextFiles) {
+      if (file.outputContext) {
+        additionalContext.push({
+          type: ContextType.OutputContext,
+          content: '',
+          currentCellContents: null,
+          filePath: file.path,
+          cellIndex: file.cellIndex,
+          outputContext: file.outputContext
+        });
+        continue;
+      }
+
       if (
         currentFileUsesWholeDocument &&
         activeDocumentInfo?.filePath === file.path
@@ -2051,7 +2134,33 @@ function SidebarComponent(props: any) {
       if (file.source === 'upload') {
         contextItem.isUpload = true;
       }
+      if (file.isImage) {
+        contextItem.isImage = true;
+        contextItem.mimeType = file.mimeType ?? 'image/png';
+      }
       additionalContext.push(contextItem);
+    }
+
+    // Auto-submit caller (e.g. Explain/Troubleshoot menu items) passes the
+    // freshly-attached output bundle directly: the matching pill is queued
+    // via setSelectedContextFiles in the same tick, so reading it from state
+    // here would still be empty. Dedup against any pre-existing pill for the
+    // same cell to avoid double-bundling.
+    if (options?.extraOutputContext) {
+      const extra = options.extraOutputContext;
+      const alreadyAttached = selectedContextFiles.some(
+        f => f.path === extra.path && f.outputContext
+      );
+      if (!alreadyAttached && extra.outputContext) {
+        additionalContext.push({
+          type: ContextType.OutputContext,
+          content: '',
+          currentCellContents: null,
+          filePath: extra.path,
+          cellIndex: extra.cellIndex,
+          outputContext: extra.outputContext
+        });
+      }
     }
 
     setShowWorkspaceFilePicker(false);
@@ -2189,10 +2298,11 @@ function SidebarComponent(props: any) {
       }
     );
 
-    const newPrompt = '';
-
-    setPrompt(newPrompt);
-    filterPrefixSuggestions(newPrompt);
+    if (!isAutoSubmit) {
+      const newPrompt = '';
+      setPrompt(newPrompt);
+      filterPrefixSuggestions(newPrompt);
+    }
 
     telemetryEmitter.emitTelemetryEvent({
       type: TelemetryEventType.ChatRequest,
@@ -2206,6 +2316,12 @@ function SidebarComponent(props: any) {
       }
     });
   };
+
+  // Refresh the ref so listeners registered with stable identity (e.g.
+  // addOutputContextHandler) always invoke the latest closure of submit
+  // and see current chat state.
+  const handleUserInputSubmitRef = useRef(handleUserInputSubmit);
+  handleUserInputSubmitRef.current = handleUserInputSubmit;
 
   const handleUserInputCancel = async () => {
     NBIAPI.sendWebSocketMessage(
@@ -2421,12 +2537,6 @@ function SidebarComponent(props: any) {
         case RunChatCompletionType.FixThis:
           message = `Fix this code:\n\`\`\`\n${request.content}\n\`\`\`\n`;
           break;
-        case RunChatCompletionType.ExplainThisOutput:
-          message = `Explain this notebook cell output: \n\`\`\`\n${request.content}\n\`\`\`\n`;
-          break;
-        case RunChatCompletionType.TroubleshootThisOutput:
-          message = `Troubleshoot errors reported in the notebook cell output: \n\`\`\`\n${request.content}\n\`\`\`\n`;
-          break;
       }
       const messageId = UUID.uuid4();
       request.messageId = messageId;
@@ -2454,7 +2564,7 @@ function SidebarComponent(props: any) {
       const contents: IChatMessageContent[] = [];
 
       submitCompletionRequest(request, {
-        emit: response => {
+        emit: async response => {
           if (response.type === BackendMessageType.StreamMessage) {
             const delta = response.data['choices']?.[0]?.['delta'];
             if (!delta) {
@@ -2511,6 +2621,33 @@ function SidebarComponent(props: any) {
             }
           } else if (response.type === BackendMessageType.StreamEnd) {
             setCopilotRequestInProgress(false);
+          } else if (response.type === BackendMessageType.RunUICommand) {
+            const runUiMessageId = response.id;
+            let result = 'void';
+            try {
+              result = await props
+                .getApp()
+                .commands.execute(response.data.commandId, response.data.args);
+            } catch (error) {
+              result = `Error executing command: ${error}`;
+            }
+
+            const data = {
+              callback_id: response.data.callback_id,
+              result: result || 'void'
+            };
+
+            try {
+              JSON.stringify(data);
+            } catch (error) {
+              data.result = 'Could not serialize the result';
+            }
+
+            NBIAPI.sendWebSocketMessage(
+              runUiMessageId,
+              RequestDataType.RunUICommandResponse,
+              data
+            );
           }
           const messageId = UUID.uuid4();
           setChatMessages([
@@ -2542,6 +2679,63 @@ function SidebarComponent(props: any) {
       );
     };
   }, [chatMessages]);
+
+  const addOutputContextHandler = useCallback((eventData: any) => {
+    const detail = eventData?.detail;
+    if (!detail || !detail.outputContext) {
+      return;
+    }
+    const cellIndex: number | undefined = detail.cellIndex;
+    const notebookFilename: string | undefined = detail.notebookFilename;
+    const cellId: string | undefined = detail.cellId;
+    const autoSubmitPrompt: string | undefined = detail.autoSubmitPrompt;
+    // Cell IDs are stable across cell moves/renames, so two right-clicks on
+    // the same cell collapse to one attachment. Fall back to the (notebook,
+    // index) tuple only when the platform doesn't expose an ID.
+    const path = cellId
+      ? `nbi://output/cell/${cellId}`
+      : `nbi://output/${notebookFilename ?? 'notebook'}/${cellIndex ?? 0}`;
+
+    const attached: ISelectedContextFile = {
+      content: '',
+      lineCount: 0,
+      path,
+      type: 'output',
+      outputContext: detail.outputContext as IOutputContextItem,
+      cellIndex,
+      notebookFilename
+    };
+
+    setSelectedContextFiles(prev => {
+      if (prev.some(file => file.path === path)) {
+        return prev;
+      }
+      if (prev.length >= MAX_ATTACHED_FILES) {
+        return prev;
+      }
+      return [...prev, attached];
+    });
+
+    if (autoSubmitPrompt) {
+      handleUserInputSubmitRef.current({
+        promptOverride: autoSubmitPrompt,
+        extraOutputContext: attached
+      });
+    }
+  }, []);
+
+  useEffect(() => {
+    document.addEventListener(
+      'copilotSidebar:addOutputContext',
+      addOutputContextHandler
+    );
+    return () => {
+      document.removeEventListener(
+        'copilotSidebar:addOutputContext',
+        addOutputContextHandler
+      );
+    };
+  }, [addOutputContextHandler]);
 
   const activeDocumentChangeHandler = (eventData: any) => {
     // if file changes reset the context toggle
@@ -2767,6 +2961,7 @@ function SidebarComponent(props: any) {
             rows={3}
             onChange={onPromptChange}
             onKeyDown={onPromptKeyDown}
+            onPaste={handlePaste}
             placeholder="Ask Notebook Intelligence..."
             spellCheck={false}
             value={prompt}
@@ -2797,35 +2992,57 @@ function SidebarComponent(props: any) {
                   )}
                 </div>
               )}
-              {selectedContextFiles.map(file => (
-                <div
-                  key={file.serverPath ?? file.path}
-                  className={`user-input-context user-input-context-selected-file on${file.source === 'upload' ? ' uploaded-file' : ''}`}
-                  title={
-                    file.source === 'upload'
-                      ? `Uploaded: ${file.path}`
-                      : file.path
-                  }
-                >
-                  <div>
-                    {file.source === 'upload' ? (
-                      <>
-                        <VscCloudUpload /> {file.path}
-                      </>
-                    ) : (
-                      file.path
-                    )}
-                  </div>
+              {selectedContextFiles.map(file => {
+                const isOutput = !!file.outputContext;
+                const cellLabel =
+                  typeof file.cellIndex === 'number'
+                    ? `Cell ${file.cellIndex + 1} output`
+                    : 'Cell output';
+                const label = isOutput
+                  ? file.notebookFilename
+                    ? `${cellLabel} (${file.notebookFilename})`
+                    : cellLabel
+                  : file.path;
+                const titleText = isOutput
+                  ? label
+                  : file.source === 'upload'
+                    ? `Uploaded: ${file.path}`
+                    : file.path;
+                return (
                   <div
-                    className="user-input-context-toggle"
-                    onClick={() =>
-                      removeSelectedContextFile(file.serverPath ?? file.path)
-                    }
+                    key={file.serverPath ?? file.path}
+                    className={`user-input-context user-input-context-selected-file on${file.source === 'upload' ? ' uploaded-file' : ''}${file.isImage ? ' image-file' : ''}${isOutput ? ' output-context' : ''}`}
+                    title={titleText}
                   >
-                    <VscClose title="Remove attached file" />
+                    <div>
+                      {file.isImage && file.imageDataUrl ? (
+                        <>
+                          <img
+                            src={file.imageDataUrl}
+                            className="context-pill-thumbnail"
+                            alt={file.path}
+                          />
+                          {file.path}
+                        </>
+                      ) : file.source === 'upload' ? (
+                        <>
+                          <VscCloudUpload /> {file.path}
+                        </>
+                      ) : (
+                        label
+                      )}
+                    </div>
+                    <div
+                      className="user-input-context-toggle"
+                      onClick={() =>
+                        removeSelectedContextFile(file.serverPath ?? file.path)
+                      }
+                    >
+                      <VscClose title="Remove attached file" />
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
               {isUploadingFiles && (
                 <div className="user-input-context uploading-indicator">
                   <div className="loading-ellipsis">Uploading</div>
@@ -3217,17 +3434,48 @@ function SidebarComponent(props: any) {
 function InlinePopoverComponent(props: any) {
   const [modifiedCode, setModifiedCode] = useState<string>('');
   const [promptSubmitted, setPromptSubmitted] = useState(false);
+  // Tracks the in-flight backend request so Escape / Cancel / Accept can
+  // stop it via CancelChatRequest. Cleared on StreamEnd so a stale cancel
+  // doesn't fire after the response already finished.
+  const inflightMessageIdRef = useRef<string | null>(null);
+  // Mirrors InlinePromptWidget._streamError so this component can branch
+  // on it independently. Set when the backend tags a delta with
+  // nbi_stream_error; cleared on the next submit / StreamEnd.
+  const streamErrorRef = useRef<string | null>(null);
   const originalOnRequestSubmitted = props.onRequestSubmitted;
   const originalOnResponseEmit = props.onResponseEmit;
+  const originalOnRequestCancelled = props.onRequestCancelled;
+  const originalOnUpdatedCodeAccepted = props.onUpdatedCodeAccepted;
+
+  const cancelInflightRequest = () => {
+    const messageId = inflightMessageIdRef.current;
+    if (!messageId) {
+      return;
+    }
+    // Backend matches cancellations by websocket message id (see
+    // WebsocketCopilotHandler.on_message). Without this send the request
+    // keeps streaming server-side after the popover dismisses, burning
+    // tokens and wasting an inference.
+    NBIAPI.sendWebSocketMessage(
+      messageId,
+      RequestDataType.CancelChatRequest,
+      {}
+    );
+    inflightMessageIdRef.current = null;
+  };
 
   const onRequestSubmitted = (prompt: string) => {
     setModifiedCode('');
     setPromptSubmitted(true);
+    streamErrorRef.current = null;
     originalOnRequestSubmitted(prompt);
   };
 
   const onResponseEmit = (response: any) => {
     if (response.type === BackendMessageType.StreamMessage) {
+      if (typeof response.data?.nbi_stream_error === 'string') {
+        streamErrorRef.current = response.data.nbi_stream_error;
+      }
       const delta = response.data['choices']?.[0]?.['delta'];
       if (!delta) {
         return;
@@ -3239,12 +3487,45 @@ function InlinePopoverComponent(props: any) {
       }
       setModifiedCode((modifiedCode: string) => modifiedCode + responseMessage);
     } else if (response.type === BackendMessageType.StreamEnd) {
-      setModifiedCode((modifiedCode: string) =>
-        extractLLMGeneratedCode(modifiedCode)
-      );
+      // Only fence-strip on a clean stream. On error the marker has to
+      // stay visible in the diff pane so the modify-existing user has a
+      // persistent failure signal before deciding to Accept the
+      // truncated result.
+      if (!streamErrorRef.current) {
+        setModifiedCode((modifiedCode: string) =>
+          extractLLMGeneratedCode(modifiedCode)
+        );
+      }
+      // streamErrorRef intentionally outlives StreamEnd: Accept fires
+      // afterwards and needs to know the stream errored so it can
+      // dismiss instead of writing an empty buffer over the user's
+      // selection. Cleared on the next submit (see onRequestSubmitted).
+      inflightMessageIdRef.current = null;
     }
 
     originalOnResponseEmit(response);
+  };
+
+  const onRequestCancelled = () => {
+    cancelInflightRequest();
+    originalOnRequestCancelled();
+  };
+
+  // Accept on a partial diff used to leave the backend stream running
+  // off-screen, spending tokens on output the UI no longer used. Cancel
+  // the in-flight request before applying so a mid-stream Accept
+  // releases the upstream call too. When the stream errored the buffer
+  // is at best truncated and at worst marker-only, which would write an
+  // empty string over the user's selection — extractLLMGeneratedCode
+  // strips the marker and the remainder is just whitespace. Treat
+  // Accept as cancel in that case so the selection survives.
+  const onUpdatedCodeAccepted = () => {
+    if (streamErrorRef.current) {
+      onRequestCancelled();
+      return;
+    }
+    cancelInflightRequest();
+    originalOnUpdatedCodeAccepted();
   };
 
   return (
@@ -3253,7 +3534,11 @@ function InlinePopoverComponent(props: any) {
         {...props}
         onRequestSubmitted={onRequestSubmitted}
         onResponseEmit={onResponseEmit}
-        onUpdatedCodeAccepted={props.onUpdatedCodeAccepted}
+        onRequestCancelled={onRequestCancelled}
+        onMessageIdChange={(id: string) => {
+          inflightMessageIdRef.current = id;
+        }}
+        onUpdatedCodeAccepted={onUpdatedCodeAccepted}
         limitHeight={props.existingCode !== '' && promptSubmitted}
       />
       {props.existingCode !== '' && promptSubmitted && (
@@ -3263,7 +3548,7 @@ function InlinePopoverComponent(props: any) {
             <div>
               <button
                 className="jp-Button jp-mod-accept jp-mod-styled jp-mod-small"
-                onClick={() => props.onUpdatedCodeAccepted()}
+                onClick={() => onUpdatedCodeAccepted()}
               >
                 Accept
               </button>
@@ -3271,7 +3556,7 @@ function InlinePopoverComponent(props: any) {
             <div>
               <button
                 className="jp-Button jp-mod-reject jp-mod-styled jp-mod-small"
-                onClick={() => props.onRequestCancelled()}
+                onClick={() => onRequestCancelled()}
               >
                 Cancel
               </button>
@@ -3347,9 +3632,14 @@ function InlinePromptComponent(props: any) {
       }
     }
 
+    const messageId = UUID.uuid4();
+    // Hand the id back to the popover so its cancel handler can send a
+    // CancelChatRequest with the matching id.
+    props.onMessageIdChange?.(messageId);
+
     submitCompletionRequest(
       {
-        messageId: UUID.uuid4(),
+        messageId,
         chatId: UUID.uuid4(),
         type: RunChatCompletionType.GenerateCode,
         content: prompt,

@@ -76,7 +76,14 @@ export function MarkdownRenderer({
             );
           };
 
-          return !inline && match ? (
+          if (inline || !match) {
+            return (
+              <code className={className} {...props}>
+                {children}
+              </code>
+            );
+          }
+          return (
             <div>
               <div className="code-block-header">
                 <div className="code-block-header-language">
@@ -127,10 +134,6 @@ export function MarkdownRenderer({
                 {codeString}
               </SyntaxHighlighter>
             </div>
-          ) : (
-            <code className={className} {...props}>
-              {children}
-            </code>
           );
         }
       }}

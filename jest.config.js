@@ -3,6 +3,7 @@
 /** @type {import('jest').Config} */
 module.exports = {
   testEnvironment: 'jsdom',
+  setupFilesAfterEnv: ['<rootDir>/tests/ts/setup.ts'],
   testMatch: [
     '<rootDir>/tests/ts/**/*.test.ts',
     '<rootDir>/tests/ts/**/*.test.tsx'
@@ -19,7 +20,8 @@ module.exports = {
   // tiktoken pulls in WebAssembly that doesn't load cleanly under jsdom.
   // The tests don't depend on real tokenization, so stub it out.
   moduleNameMapper: {
-    '^tiktoken$': '<rootDir>/tests/ts/__mocks__/tiktoken.ts'
+    '^tiktoken$': '<rootDir>/tests/ts/__mocks__/tiktoken.ts',
+    '\\.svg$': '<rootDir>/tests/ts/__mocks__/svg.ts'
   },
   clearMocks: true
 };

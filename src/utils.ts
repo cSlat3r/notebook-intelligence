@@ -56,6 +56,20 @@ export function moveCodeSectionBoundaryMarkersToNewLine(
 }
 
 export function extractLLMGeneratedCode(code: string): string {
+  // Strip our backend-emitted stream-interruption marker. The Claude inline
+  // handler pushes it into the same text channel so the diff pane shows
+  // what went wrong, but we never want it landing verbatim in the user's
+  // file when fresh-generation auto-inserts the result (or when the user
+  // accepts a truncated diff). The pattern is anchored to end-of-string
+  // because the backend always emits the marker as the last delta, and
+  // its closing bracket is required so legitimate generated code that
+  // happens to contain the phrase mid-buffer (e.g.
+  // ``print("[Stream interrupted: demo]")``) is not stripped. Greedy
+  // ``[^\n]*\]`` backtracks to the last ``]`` on the marker line, so
+  // bracketed exception strings such as
+  // ``[SSL: CERTIFICATE_VERIFY_FAILED] unable to get local issuer certificate``
+  // and ``[Errno 11001] getaddrinfo failed`` are still matched in full.
+  code = code.replace(/\n*\[Stream interrupted:[^\n]*\]\n*$/, '');
   if (code.endsWith('```')) {
     code = code.slice(0, -3);
   }
@@ -101,6 +115,26 @@ export function markdownToComment(source: string): string {
     .join('\n');
 }
 
+export function formatJupyterError(output: any): string {
+  const head = `${output.ename ?? 'Error'}: ${output.evalue ?? ''}`.trim();
+  const tb = Array.isArray(output.traceback)
+    ? output.traceback.map((line: string) => removeAnsiChars(line)).join('\n')
+    : '';
+  return tb ? `${head}\n${tb}` : head;
+}
+
+// True when the output area contains at least one error output. Avoids the
+// full toJSON() serialization callers used to do for a 1-bit check.
+export function cellOutputHasError(cell: CodeCell): boolean {
+  const model = cell.outputArea.model;
+  for (let i = 0; i < model.length; i++) {
+    if (model.get(i).type === 'error') {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function cellOutputAsText(cell: CodeCell): string {
   let content = '';
   const outputs = cell.outputArea.model.toJSON();
@@ -113,12 +147,10 @@ export function cellOutputAsText(cell: CodeCell): string {
     } else if (output.output_type === 'stream') {
       content += output.text + '\n';
     } else if (output.output_type === 'error') {
+      // Skip errors without a traceback to match historical behavior of this
+      // function; the head-only case is intentional here.
       if (Array.isArray(output.traceback)) {
-        content += output.ename + ': ' + output.evalue + '\n';
-        content +=
-          output.traceback
-            .map(item => removeAnsiChars(item as string))
-            .join('\n') + '\n';
+        content += formatJupyterError(output) + '\n';
       }
     }
   }
@@ -129,6 +161,27 @@ export function cellOutputAsText(cell: CodeCell): string {
 export function getTokenCount(source: string): number {
   const tokens = tiktoken_encoding.encode(source);
   return tokens.length;
+}
+
+// Encode once, slice the token array, decode back. Avoids the O(log n)
+// re-encoding a binary search would do on every truncation. Returns
+// `truncated: true` when the input exceeded the cap so callers don't need a
+// second `getTokenCount` pass to detect truncation.
+export function truncateToTokenCount(
+  text: string,
+  maxTokens: number
+): { text: string; size: number; truncated: boolean } {
+  if (maxTokens <= 0 || text.length === 0) {
+    return { text: '', size: 0, truncated: text.length > 0 };
+  }
+  const tokens = tiktoken_encoding.encode(text);
+  if (tokens.length <= maxTokens) {
+    return { text, size: tokens.length, truncated: false };
+  }
+  const sliced = tokens.slice(0, maxTokens);
+  const bytes = tiktoken_encoding.decode(sliced);
+  const decoded = new TextDecoder('utf-8').decode(bytes);
+  return { text: decoded, size: sliced.length, truncated: true };
 }
 
 export function compareSelectionPoints(
@@ -187,13 +240,33 @@ export function applyCodeToSelectionInEditor(
   code: string
 ) {
   const selection = editor.getSelection();
-  const startOffset = editor.getOffsetAt(selection.start);
-  const endOffset = editor.getOffsetAt(selection.end);
+  const selectionStartOffset = editor.getOffsetAt(selection.start);
+  const selectionEndOffset = editor.getOffsetAt(selection.end);
+  const startOffset = Math.min(selectionStartOffset, selectionEndOffset);
+  const endOffset = Math.max(selectionStartOffset, selectionEndOffset);
+  const cursorOffset = startOffset + code.length;
+  const codeMirrorEditor = editor as CodeEditor.IEditor & {
+    editor?: {
+      dispatch: (spec: {
+        changes: { from: number; to: number; insert: string };
+        selection: { anchor: number };
+        scrollIntoView: boolean;
+      }) => void;
+    };
+  };
 
-  editor.model.sharedModel.updateSource(startOffset, endOffset, code);
-  const numAddedLines = code.split('\n').length;
+  if (codeMirrorEditor.editor?.dispatch) {
+    codeMirrorEditor.editor.dispatch({
+      changes: { from: startOffset, to: endOffset, insert: code },
+      selection: { anchor: cursorOffset },
+      scrollIntoView: true
+    });
+  } else {
+    editor.model.sharedModel.updateSource(startOffset, endOffset, code);
+  }
+
   const cursorLine = Math.min(
-    selection.start.line + numAddedLines - 1,
+    editor.getPositionAt(cursorOffset).line,
     editor.lineCount - 1
   );
   const cursorColumn = editor.getLine(cursorLine)?.length || 0;

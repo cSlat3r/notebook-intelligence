@@ -22,10 +22,12 @@ from notebook_intelligence.api import ChatResponse, MarkdownData
 from notebook_intelligence.claude import (
     ClaudeAgentClientStatus,
     ClaudeAgentEventType,
+    ClaudeChatModel,
     ClaudeCodeChatParticipant,
     ClaudeCodeClient,
     SignalImpl,
     _normalize_anthropic_credential,
+    _extract_text_from_content,
 )
 
 
@@ -43,6 +45,7 @@ def _make_client():
     client._status = ClaudeAgentClientStatus.NotConnected
     client._server_info = None
     client._server_info_lock = threading.Lock()
+    client._connect_lock = threading.Lock()
     client._reconnect_required = False
     client._continue_conversation = None
     return client
@@ -396,6 +399,161 @@ class TestConnectWaitsForReadiness:
         assert "server log" in result
 
 
+class TestConnectInBackground:
+    """``__init__`` must return promptly even when the SDK handshake is slow,
+    so JupyterLab's server startup isn't blocked for the
+    ``CLAUDE_AGENT_CONNECT_TIMEOUT`` window (#163). The synchronous
+    ``connect()`` is preserved for chat-request callers that need readiness
+    state before issuing a query.
+    """
+
+    def test_connect_in_background_returns_immediately_when_worker_slow(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "notebook_intelligence.claude.CLAUDE_AGENT_CONNECT_TIMEOUT", 5
+        )
+        client = _make_client()
+        client._update_server_info_async = Mock()
+
+        stop_worker = threading.Event()
+
+        async def slow_worker():
+            # Worker takes 0.3s to "handshake" — far longer than the budget
+            # we'd accept on the JupyterLab startup path.
+            await asyncio.sleep(0.3)
+            client._status = ClaudeAgentClientStatus.Connected
+            client._connect_resolved.set()
+            while not stop_worker.is_set():
+                await asyncio.sleep(0.01)
+
+        client._client_thread_func = slow_worker
+
+        try:
+            start = time.monotonic()
+            client.connect_in_background()
+            elapsed = time.monotonic() - start
+            # The connect dispatch should return well under the worker's own
+            # delay. 100ms is generous for a thread-spawn and lock-acquire.
+            assert elapsed < 0.1, (
+                f"connect_in_background blocked for {elapsed:.3f}s; expected "
+                f"non-blocking dispatch"
+            )
+        finally:
+            stop_worker.set()
+            if client._client_thread is not None:
+                client._client_thread.join(timeout=1)
+
+    def test_init_returns_quickly_even_when_handshake_hangs(self, monkeypatch):
+        """End-to-end of the #163 fix: constructing a ``ClaudeCodeClient`` no
+        longer blocks the caller for the full connect timeout when the
+        worker takes longer than expected."""
+        monkeypatch.setattr(
+            "notebook_intelligence.claude.CLAUDE_AGENT_CONNECT_TIMEOUT", 5
+        )
+
+        # Replace the worker entrypoint with a slow stub before constructing
+        # the client. _start_worker_thread reads
+        # ``self._client_thread_func`` lazily via ``self._client_thread_func()``,
+        # so monkey-patching the bound name on the instance is enough.
+        original_init = ClaudeCodeClient.__init__
+        slow_func_holders = {}
+
+        def patched_init(self, host, options):
+            stop = threading.Event()
+            slow_func_holders[id(self)] = stop
+
+            async def slow():
+                # Check the stop flag frequently so cleanup doesn't have to
+                # wait the full 2-second handshake delay.
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline and not stop.is_set():
+                    await asyncio.sleep(0.05)
+                while not stop.is_set():
+                    await asyncio.sleep(0.05)
+
+            # Stub out the bits that touch real infrastructure.
+            self._client_thread_func = slow
+            original_init(self, host, options)
+
+        monkeypatch.setattr(ClaudeCodeClient, "__init__", patched_init)
+
+        host = MagicMock()
+        host.websocket_connector = None
+        options = MagicMock()
+
+        start = time.monotonic()
+        client = ClaudeCodeClient(host, options)
+        elapsed = time.monotonic() - start
+
+        try:
+            # 500ms is the budget called out in the issue: well under the
+            # 15s default timeout, generous enough to absorb thread-start
+            # overhead on a loaded CI runner.
+            assert elapsed < 0.5, (
+                f"__init__ blocked for {elapsed:.3f}s; should dispatch the "
+                f"handshake to a background thread"
+            )
+            # Status reflects the in-flight connect, not a completed one.
+            assert client._status in (
+                ClaudeAgentClientStatus.Connecting,
+                ClaudeAgentClientStatus.NotConnected,
+            )
+        finally:
+            stop = slow_func_holders.get(id(client))
+            if stop is not None:
+                stop.set()
+            # Give the background connect dispatcher a beat to finish spawning
+            # the worker before we try to join it.
+            for _ in range(50):
+                if client._client_thread is not None:
+                    break
+                time.sleep(0.05)
+            if client._client_thread is not None:
+                client._client_thread.join(timeout=5)
+
+    def test_concurrent_connect_does_not_double_spawn(self, monkeypatch):
+        """If a chat handler hits ``_ensure_connected()`` while the background
+        ``__init__`` connect is mid-handshake, the lock must serialise them
+        so we don't end up with two worker threads racing on ``self._client``.
+        """
+        monkeypatch.setattr(
+            "notebook_intelligence.claude.CLAUDE_AGENT_CONNECT_TIMEOUT", 5
+        )
+        client = _make_client()
+        client._update_server_info_async = Mock()
+
+        spawn_count = {"n": 0}
+        stop_worker = threading.Event()
+
+        async def counting_worker():
+            spawn_count["n"] += 1
+            await asyncio.sleep(0.05)
+            client._status = ClaudeAgentClientStatus.Connected
+            client._connect_resolved.set()
+            while not stop_worker.is_set():
+                await asyncio.sleep(0.01)
+
+        client._client_thread_func = counting_worker
+
+        try:
+            t1 = threading.Thread(target=client.connect)
+            t2 = threading.Thread(target=client.connect)
+            t1.start()
+            t2.start()
+            t1.join(timeout=3)
+            t2.join(timeout=3)
+
+            assert spawn_count["n"] == 1, (
+                f"expected 1 worker thread, got {spawn_count['n']}"
+            )
+            assert client.is_connected()
+        finally:
+            stop_worker.set()
+            if client._client_thread is not None:
+                client._client_thread.join(timeout=1)
+
+
 class TestOtherCallersEnsureConnected:
     """update_server_info / clear_chat_history used to check only
     _reconnect_required, not is_connected(), so a dead thread without the
@@ -504,6 +662,286 @@ class TestHandleChatRequestErrorHandling:
         response.finish.assert_not_called()
         response.stream.assert_not_called()
 
+
+class _FakeMessageStream:
+    """Stand-in for the Anthropic SDK's MessageStreamManager.
+
+    The SDK returns a sync context manager whose ``text_stream`` attribute
+    yields decoded text deltas. ``ClaudeChatModel.completions`` only touches
+    those two pieces, so the fake mirrors exactly that surface."""
+
+    def __init__(self, chunks):
+        self.text_stream = iter(chunks)
+        self.entered = False
+        self.exited = False
+
+    def __enter__(self):
+        self.entered = True
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.exited = True
+        return False
+
+
+def _make_chat_model(chunks):
+    """Build a ``ClaudeChatModel`` without calling __init__ (avoids hitting
+    the live Anthropic API). The returned model has its ``_client.messages
+    .stream`` wired to a ``_FakeMessageStream`` that yields ``chunks``."""
+    model = ClaudeChatModel.__new__(ClaudeChatModel)
+    model._model_id = "claude-sonnet-test"
+    model._model_name = "Claude Sonnet (test)"
+    model._context_window = 200000
+    model._supports_tools = True
+    model._client = MagicMock()
+    fake_stream = _FakeMessageStream(chunks)
+    model._client.messages.stream = MagicMock(return_value=fake_stream)
+    return model, fake_stream
+
+
+class TestClaudeChatModelStreaming:
+    """``ClaudeChatModel.completions`` powers Claude-mode inline chat
+    (Ctrl+G). It must stream deltas as they arrive so the diff pane fills
+    in progressively, honour the cancel token between chunks, and always
+    end with ``response.finish()`` so the front-end stops the spinner."""
+
+    def test_each_chunk_is_streamed_as_its_own_delta(self):
+        # Three deltas in -> three response.stream calls out -> one finish.
+        # Proves we no longer buffer the whole response into a single delta.
+        model, fake_stream = _make_chat_model(["def ", "foo():", "\n    pass"])
+        response = MagicMock()
+
+        model.completions(messages=[{"role": "user", "content": "x"}], response=response)
+
+        assert response.stream.call_count == 3
+        emitted = [
+            call.args[0]["choices"][0]["delta"]["content"]
+            for call in response.stream.call_args_list
+        ]
+        assert emitted == ["def ", "foo():", "\n    pass"]
+        response.finish.assert_called_once()
+        # Context manager entered and exited cleanly so the SDK can release
+        # the underlying HTTP stream.
+        assert fake_stream.entered and fake_stream.exited
+
+    def test_uses_messages_stream_not_messages_create(self):
+        # Regression guard: if someone reverts this to messages.create the
+        # diff pane goes back to "empty until done". Easier to assert the
+        # API choice directly than to test the user-visible symptom.
+        model, _ = _make_chat_model(["hi"])
+        response = MagicMock()
+
+        model.completions(messages=[{"role": "user", "content": "x"}], response=response)
+
+        model._client.messages.stream.assert_called_once()
+        kwargs = model._client.messages.stream.call_args.kwargs
+        assert kwargs["model"] == "claude-sonnet-test"
+        assert kwargs["messages"] == [{"role": "user", "content": "x"}]
+        assert kwargs["max_tokens"] == 10000
+        model._client.messages.create.assert_not_called()
+
+    def test_empty_chunks_are_skipped(self):
+        # The Anthropic stream can occasionally yield empty strings between
+        # content blocks. Forwarding those wastes a websocket frame and
+        # creates an empty assistant turn in the front-end's accumulator.
+        model, _ = _make_chat_model(["hello", "", " world", ""])
+        response = MagicMock()
+
+        model.completions(messages=[{"role": "user", "content": "x"}], response=response)
+
+        assert response.stream.call_count == 2
+        emitted = [
+            call.args[0]["choices"][0]["delta"]["content"]
+            for call in response.stream.call_args_list
+        ]
+        assert emitted == ["hello", " world"]
+
+    def test_pre_cancelled_request_skips_anthropic_stream_open(self):
+        # A fast CancelChatRequest can flip the token before the worker
+        # thread reaches completions(). The check must run BEFORE the with
+        # block, otherwise the underlying messages.stream call still opens
+        # the HTTP request and burns an Anthropic call whose output has
+        # nowhere to go. finish() still runs so the websocket end event
+        # closes the front-end's spinner.
+        model, _ = _make_chat_model(["alpha", "beta"])
+        response = MagicMock()
+        cancel_token = MagicMock()
+        cancel_token.is_cancel_requested = True
+
+        model.completions(
+            messages=[{"role": "user", "content": "x"}],
+            response=response,
+            cancel_token=cancel_token,
+        )
+
+        # The actual API call must not have been opened — that's the whole
+        # point of the early-out. Asserting on response.stream alone (as an
+        # earlier version of this test did) was a false positive: a fake
+        # MessageStreamManager has no side effect analogous to opening the
+        # HTTP stream, so a missing emit doesn't prove the network was
+        # spared.
+        model._client.messages.stream.assert_not_called()
+        response.stream.assert_not_called()
+        response.finish.assert_called_once()
+
+    def test_cancel_token_short_circuits_mid_stream(self):
+        # User hits Escape while Claude is mid-response. The token flips on
+        # the next iteration so we stop emitting and let the with-block
+        # close the stream — abandoning the rest of the chunks.
+        model, _ = _make_chat_model(["alpha", "beta", "gamma"])
+        response = MagicMock()
+        cancel_token = MagicMock()
+        # Allow one chunk, then request cancel before the second.
+        cancel_token.is_cancel_requested = False
+
+        emit_count = {"n": 0}
+        original_stream = response.stream
+
+        def stream_then_cancel(payload):
+            original_stream(payload)
+            emit_count["n"] += 1
+            if emit_count["n"] == 1:
+                cancel_token.is_cancel_requested = True
+
+        response.stream = stream_then_cancel
+
+        model.completions(
+            messages=[{"role": "user", "content": "x"}],
+            response=response,
+            cancel_token=cancel_token,
+        )
+
+        # First chunk slipped through, second triggered the cancel check
+        # and broke the loop, third never reached the user.
+        emitted = [
+            payload["choices"][0]["delta"]["content"]
+            for (payload,), _ in original_stream.call_args_list
+        ]
+        assert emitted == ["alpha"]
+        # finish() still runs so the front-end's spinner closes — the user
+        # already saw the popover dismiss on Escape, but the websocket end
+        # event must arrive regardless.
+        response.finish.assert_called_once()
+
+    def test_no_cancel_token_is_safe(self):
+        # The non-Claude code paths still call completions without a cancel
+        # token. Defaulting to None must not crash.
+        model, _ = _make_chat_model(["a", "b"])
+        response = MagicMock()
+
+        model.completions(
+            messages=[{"role": "user", "content": "x"}],
+            response=response,
+            cancel_token=None,
+        )
+
+        assert response.stream.call_count == 2
+        response.finish.assert_called_once()
+
+    def test_mid_stream_exception_emits_error_marker_and_reraises(self):
+        # Anthropic raising mid-stream used to leave the diff pane showing
+        # silently truncated code (the outer handler's MarkdownData error
+        # never reaches the inline popover, which only consumes payloads with
+        # delta.content). The fix surfaces the failure as a final delta into
+        # the same channel and re-raises so the caller still finishes.
+        class ExplodingStream(_FakeMessageStream):
+            def __init__(self, before_chunks, exc):
+                super().__init__(before_chunks)
+                self._exc = exc
+
+                def gen():
+                    for c in before_chunks:
+                        yield c
+                    raise exc
+
+                self.text_stream = gen()
+
+        model = ClaudeChatModel.__new__(ClaudeChatModel)
+        model._model_id = "claude-sonnet-test"
+        model._model_name = "Claude Sonnet (test)"
+        model._context_window = 200000
+        model._supports_tools = True
+        model._client = MagicMock()
+        boom = RuntimeError("connection reset by peer")
+        model._client.messages.stream = MagicMock(
+            return_value=ExplodingStream(["def add(a, b):\n", "    return a + b"], boom)
+        )
+        response = MagicMock()
+
+        try:
+            model.completions(
+                messages=[{"role": "user", "content": "x"}], response=response
+            )
+        except RuntimeError as e:
+            assert e is boom
+        else:
+            raise AssertionError("expected the underlying stream error to propagate")
+
+        payloads = [call.args[0] for call in response.stream.call_args_list]
+        emitted = [p["choices"][0]["delta"]["content"] for p in payloads]
+        # Two real chunks, then a marker so the user sees the response was
+        # cut short instead of trusting the truncated code.
+        assert emitted[:2] == ["def add(a, b):\n", "    return a + b"]
+        assert "Stream interrupted" in emitted[-1]
+        assert "connection reset by peer" in emitted[-1]
+        # The marker payload must also carry the structured nbi_stream_error
+        # field so the front-end auto-insert path can detect the failure and
+        # skip writing the partial buffer to the user's cell.
+        assert payloads[-1].get("nbi_stream_error") == "connection reset by peer"
+        # finish() is the caller's responsibility on the error path; we must
+        # not double-finish here.
+        response.finish.assert_not_called()
+
+    def test_mid_stream_exception_with_bracketed_text_keeps_structured_field(self):
+        # Many real Anthropic / network errors contain bracketed fragments
+        # like ``[SSL: CERTIFICATE_VERIFY_FAILED]`` or ``[Errno 11001]``.
+        # The frontend marker-strip regex used to anchor on the first inner
+        # ``]`` and leak the suffix into the user's code; the popover and
+        # auto-insert paths now branch on nbi_stream_error rather than
+        # parsing the marker, so this asserts the contract the frontend
+        # depends on: the structured field carries the verbatim error text
+        # regardless of how many brackets it contains.
+        class ExplodingStream(_FakeMessageStream):
+            def __init__(self, before_chunks, exc):
+                super().__init__(before_chunks)
+
+                def gen():
+                    for c in before_chunks:
+                        yield c
+                    raise exc
+
+                self.text_stream = gen()
+
+        model = ClaudeChatModel.__new__(ClaudeChatModel)
+        model._model_id = "claude-sonnet-test"
+        model._model_name = "Claude Sonnet (test)"
+        model._context_window = 200000
+        model._supports_tools = True
+        model._client = MagicMock()
+        boom = RuntimeError(
+            "[SSL: CERTIFICATE_VERIFY_FAILED] unable to get local issuer certificate"
+        )
+        model._client.messages.stream = MagicMock(
+            return_value=ExplodingStream(["partial code"], boom)
+        )
+        response = MagicMock()
+
+        try:
+            model.completions(
+                messages=[{"role": "user", "content": "x"}], response=response
+            )
+        except RuntimeError:
+            pass
+
+        payloads = [call.args[0] for call in response.stream.call_args_list]
+        # Marker text contains the brackets verbatim — that's fine because
+        # the frontend strips by line, not by inner-bracket boundary.
+        assert "[SSL:" in payloads[-1]["choices"][0]["delta"]["content"]
+        # Structured field is the source of truth for the frontend's
+        # error-vs-success branch.
+        assert payloads[-1].get("nbi_stream_error") == str(boom)
+
+
 class TestNormalizeAnthropicCredential:
     """Settings panel saves unset string fields as ``""`` rather than ``None``.
     The Anthropic SDK forwards an empty ``base_url`` to httpx which rejects
@@ -541,3 +979,37 @@ class TestNormalizeAnthropicCredential:
         assert _normalize_anthropic_credential(1.5) is None
         assert _normalize_anthropic_credential([]) is None
         assert _normalize_anthropic_credential({"key": "x"}) is None
+
+
+class TestExtractTextFromContent:
+    def test_string_passthrough(self):
+        assert _extract_text_from_content("hello world") == "hello world"
+
+    def test_list_with_text_block(self):
+        content = [{"type": "text", "text": "describe this image"}]
+        assert _extract_text_from_content(content) == "describe this image"
+
+    def test_list_strips_image_blocks(self):
+        content = [
+            {"type": "text", "text": "The user pasted an image 'shot.png':"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc123"}},
+        ]
+        result = _extract_text_from_content(content)
+        assert result == "The user pasted an image 'shot.png':"
+        assert "base64" not in result
+
+    def test_list_with_multiple_text_blocks(self):
+        content = [
+            {"type": "text", "text": "first"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,xyz"}},
+            {"type": "text", "text": "second"},
+        ]
+        assert _extract_text_from_content(content) == "first\nsecond"
+
+    def test_list_with_only_image_returns_empty(self):
+        content = [{"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}}]
+        assert _extract_text_from_content(content) == ""
+
+    def test_list_with_non_dict_entries_skipped(self):
+        content = [{"type": "text", "text": "valid"}, "raw string", None]
+        assert _extract_text_from_content(content) == "valid"
