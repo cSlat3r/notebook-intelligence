@@ -1044,11 +1044,6 @@ const plugin: JupyterFrontEndPlugin<INotebookIntelligence> = {
 
     // Claude Code launcher tile: shows a session picker backed by history.jsonl
     // (all projects), then opens a terminal at the session's project directory.
-    const claudeIcon = new LabIcon({
-      name: 'notebook-intelligence:claude-icon',
-      svgstr: claudeSvgstr
-    });
-
     app.commands.addCommand(CommandIDs.openClaudeCodeLauncher, {
       label: 'Claude Code',
       caption: 'Resume or start a Claude Code session',
