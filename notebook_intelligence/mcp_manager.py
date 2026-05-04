@@ -252,9 +252,13 @@ class MCPServerImpl(MCPServer):
             async with await self._get_client() as client:
                 self._set_status(MCPServerStatus.Connected)
                 while True:
-                    event = self._client_queue.get(block=True)
+                    queue = self._client_queue
+                    if queue is None:
+                        return
+                    event = queue.get(block=True)
                     event_id = event["id"]
                     event_type = event["type"]
+                    signal = self._client_thread_signal
                     if event_type == MCPServerEventType.ListTools:
                         try:
                             tool_list = await client.list_tools()
@@ -262,10 +266,11 @@ class MCPServerImpl(MCPServer):
                             log.error(f"Error occurred while listing MCP tools: {str(e)}")
                             tool_list = []
                         finally:
-                            self._client_thread_signal.emit({
-                                "id": event_id,
-                                "data": tool_list
-                            })
+                            if signal is not None:
+                                signal.emit({
+                                    "id": event_id,
+                                    "data": tool_list
+                                })
                     elif event_type == MCPServerEventType.CallTool:
                         try:
                             result = await client.call_tool(event["args"]["tool_name"], event["args"]["tool_args"])
@@ -273,15 +278,17 @@ class MCPServerImpl(MCPServer):
                             result = f"Error occurred while calling MCP tool {event['args']['tool_name']}: {str(e)}"
                             log.error(result)
                         finally:
-                            self._client_thread_signal.emit({
-                                "id": event_id,
-                                "data": result
-                            })
+                            if signal is not None:
+                                signal.emit({
+                                    "id": event_id,
+                                    "data": result
+                                })
                     elif event_type == MCPServerEventType.StopServer:
-                        self._client_thread_signal.emit({
-                            "id": event_id,
-                            "data": "stopped"
-                        })
+                        if signal is not None:
+                            signal.emit({
+                                "id": event_id,
+                                "data": "stopped"
+                            })
                         return
                     elif event_type == MCPServerEventType.ListPrompts:
                         try:
@@ -290,10 +297,11 @@ class MCPServerImpl(MCPServer):
                             log.error(f"Error occurred while listing MCP prompts: {str(e)}")
                             prompts = []
                         finally:
-                            self._client_thread_signal.emit({
-                                "id": event_id,
-                                "data": prompts
-                            })
+                            if signal is not None:
+                                signal.emit({
+                                    "id": event_id,
+                                    "data": prompts
+                                })
                     elif event_type == MCPServerEventType.GetPromptValue:
                         try:
                             prompt = await client.get_prompt(event["args"]["prompt_name"], event["args"]["prompt_args"])
@@ -301,10 +309,11 @@ class MCPServerImpl(MCPServer):
                             prompt = None
                             log.error(f"Error occurred while getting MCP prompt value {event['args']['prompt_name']}: {str(e)}")
                         finally:
-                            self._client_thread_signal.emit({
-                                "id": event_id,
-                                "data": prompt.messages
-                            })
+                            if signal is not None:
+                                signal.emit({
+                                    "id": event_id,
+                                    "data": prompt.messages
+                                })
                     else:
                         log.error(f"Unknown event type {event}")
         except Exception as e:

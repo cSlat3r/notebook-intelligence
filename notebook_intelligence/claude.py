@@ -517,9 +517,13 @@ class ClaudeCodeClient():
                 set_current_claude_client(client)
 
                 while True:
-                    event = self._client_queue.get(block=True)
+                    queue = self._client_queue
+                    if queue is None:
+                        return
+                    event = queue.get(block=True)
                     event_id = event["id"]
                     event_type = event["type"]
+                    signal = self._client_thread_signal
                     if event_type == ClaudeAgentEventType.Query:
                         try:
                             request: ChatRequest = event["args"]["request"]
@@ -575,10 +579,11 @@ class ClaudeCodeClient():
                             if not self._reconnect_required:
                                 response.stream(MarkdownData(err_msg))
                         finally:
-                            self._client_thread_signal.emit({
-                                "id": event_id,
-                                "data": "query completed"
-                            })
+                            if signal is not None:
+                                signal.emit({
+                                    "id": event_id,
+                                    "data": "query completed"
+                                })
                             set_current_request(None)
                             set_current_response(None)
                     elif event_type == ClaudeAgentEventType.GetServerInfo:
@@ -588,10 +593,11 @@ class ClaudeCodeClient():
                             log.error(f"Error occurred while getting server info: {str(e)}")
                             server_info = None
                         finally:
-                            self._client_thread_signal.emit({
-                                "id": event_id,
-                                "data": server_info
-                            })
+                            if signal is not None:
+                                signal.emit({
+                                    "id": event_id,
+                                    "data": server_info
+                                })
                     elif event_type == ClaudeAgentEventType.ClearChatHistory:
                         try:
                            await client.query('/clear')
@@ -601,15 +607,17 @@ class ClaudeCodeClient():
                         except Exception as e:
                             log.error(f"Error occurred while clearing chat history: {str(e)}")
                         finally:
-                            self._client_thread_signal.emit({
-                                "id": event_id,
-                                "data": "chat history cleared"
-                            })
+                            if signal is not None:
+                                signal.emit({
+                                    "id": event_id,
+                                    "data": "chat history cleared"
+                                })
                     elif event_type == ClaudeAgentEventType.StopClient:
-                        self._client_thread_signal.emit({
-                            "id": event_id,
-                            "data": "stopped"
-                        })
+                        if signal is not None:
+                            signal.emit({
+                                "id": event_id,
+                                "data": "stopped"
+                            })
                         return
                     else:
                         log.error(f"Unknown event type {event}")
