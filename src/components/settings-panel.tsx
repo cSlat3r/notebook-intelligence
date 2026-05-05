@@ -10,6 +10,7 @@ import claudeSvgStr from '../../style/icons/claude.svg';
 import {
   ClaudeModelType,
   ClaudeToolType,
+  ICellOutputFeatureFlag,
   IClaudeModelInfo,
   NBIAPI
 } from '../api';
@@ -17,6 +18,34 @@ import { CheckBoxItem } from './checkbox';
 import { PillItem } from './pill';
 import { mcpServerSettingsToEnabledState } from './mcp-util';
 import { SettingsPanelComponentSkills } from './skills-panel';
+
+const lockedTip = (locked: boolean): string =>
+  locked ? 'Locked by your administrator' : '';
+
+// When a boolean policy is locked the panel shows the policy-resolved value;
+// otherwise it shows the user's local toggle state.
+const checkedValue = (
+  policy: ICellOutputFeatureFlag,
+  userValue: boolean
+): boolean => (policy.locked ? policy.enabled : userValue);
+
+function useNbiPolicies() {
+  const [featurePolicies, setFeaturePolicies] = useState(
+    NBIAPI.config.featurePolicies
+  );
+  const [settingLocks, setSettingLocks] = useState(NBIAPI.config.settingLocks);
+  useEffect(() => {
+    const handler = () => {
+      setFeaturePolicies(NBIAPI.config.featurePolicies);
+      setSettingLocks(NBIAPI.config.settingLocks);
+    };
+    NBIAPI.configChanged.connect(handler);
+    return () => {
+      NBIAPI.configChanged.disconnect(handler);
+    };
+  }, []);
+  return { featurePolicies, settingLocks };
+}
 
 const OPENAI_COMPATIBLE_CHAT_MODEL_ID = 'openai-compatible-chat-model';
 const LITELLM_COMPATIBLE_CHAT_MODEL_ID = 'litellm-compatible-chat-model';
@@ -201,35 +230,23 @@ function SettingsPanelComponentGeneral(props: any) {
   );
   const [inlineCompletionDebouncerDelay, setInlineCompletionDebouncerDelay] =
     useState(nbiConfig.inlineCompletionDebouncerDelay);
-  const [cellOutputFeatures, setCellOutputFeatures] = useState(
-    nbiConfig.cellOutputFeatures
-  );
-
-  useEffect(() => {
-    const handler = () => {
-      setCellOutputFeatures(NBIAPI.config.cellOutputFeatures);
-    };
-    NBIAPI.configChanged.connect(handler);
-    return () => {
-      NBIAPI.configChanged.disconnect(handler);
-    };
-  }, []);
+  const { featurePolicies, settingLocks } = useNbiPolicies();
 
   const toggleExplainError = () => {
     NBIAPI.setConfig({
-      enable_explain_error: !cellOutputFeatures.explain_error.enabled
+      enable_explain_error: !featurePolicies.explain_error.enabled
     });
   };
 
   const toggleOutputFollowup = () => {
     NBIAPI.setConfig({
-      enable_output_followup: !cellOutputFeatures.output_followup.enabled
+      enable_output_followup: !featurePolicies.output_followup.enabled
     });
   };
 
   const toggleOutputToolbar = () => {
     NBIAPI.setConfig({
-      enable_output_toolbar: !cellOutputFeatures.output_toolbar.enabled
+      enable_output_toolbar: !featurePolicies.output_toolbar.enabled
     });
   };
 
@@ -359,9 +376,12 @@ function SettingsPanelComponentGeneral(props: any) {
               <div className="model-config-section-row">
                 <div className="model-config-section-column">
                   <div>Provider</div>
-                  <div>
+                  <div
+                    title={lockedTip(settingLocks.chat_model_provider.locked)}
+                  >
                     <select
                       className="jp-mod-styled"
+                      disabled={settingLocks.chat_model_provider.locked}
                       onChange={event =>
                         updateModelOptionsForProvider(
                           event.target.value,
@@ -404,9 +424,12 @@ function SettingsPanelComponentGeneral(props: any) {
                         LITELLM_COMPATIBLE_CHAT_MODEL_ID
                       ].includes(chatModel) &&
                         chatModels.length > 0 && (
-                          <div>
+                          <div
+                            title={lockedTip(settingLocks.chat_model_id.locked)}
+                          >
                             <select
                               className="jp-mod-styled"
+                              disabled={settingLocks.chat_model_id.locked}
                               onChange={event =>
                                 setChatModel(event.target.value)
                               }
@@ -484,9 +507,16 @@ function SettingsPanelComponentGeneral(props: any) {
             <div className="model-config-section-row">
               <div className="model-config-section-column">
                 <div>Provider</div>
-                <div>
+                <div
+                  title={lockedTip(
+                    settingLocks.inline_completion_model_provider.locked
+                  )}
+                >
                   <select
                     className="jp-mod-styled"
+                    disabled={
+                      settingLocks.inline_completion_model_provider.locked
+                    }
                     onChange={event =>
                       updateModelOptionsForProvider(
                         event.target.value,
@@ -528,9 +558,16 @@ function SettingsPanelComponentGeneral(props: any) {
                     OPENAI_COMPATIBLE_INLINE_COMPLETION_MODEL_ID,
                     LITELLM_COMPATIBLE_INLINE_COMPLETION_MODEL_ID
                   ].includes(inlineCompletionModel) && (
-                    <div>
+                    <div
+                      title={lockedTip(
+                        settingLocks.inline_completion_model_id.locked
+                      )}
+                    >
                       <select
                         className="jp-mod-styled"
+                        disabled={
+                          settingLocks.inline_completion_model_id.locked
+                        }
                         onChange={event =>
                           setInlineCompletionModel(event.target.value)
                         }
@@ -624,10 +661,20 @@ function SettingsPanelComponentGeneral(props: any) {
               <div className="model-config-section-body">
                 <div className="model-config-section-row">
                   <div className="model-config-section-column">
-                    <label>
+                    <label
+                      title={lockedTip(
+                        featurePolicies.store_github_access_token.locked
+                      )}
+                    >
                       <input
                         type="checkbox"
-                        checked={storeGitHubAccessToken}
+                        checked={checkedValue(
+                          featurePolicies.store_github_access_token,
+                          storeGitHubAccessToken
+                        )}
+                        disabled={
+                          featurePolicies.store_github_access_token.locked
+                        }
                         onChange={event => {
                           setStoreGitHubAccessToken(event.target.checked);
                         }}
@@ -650,13 +697,9 @@ function SettingsPanelComponentGeneral(props: any) {
                 <CheckBoxItem
                   label="Explain cell errors"
                   title="Show a 'Troubleshoot errors in output' context-menu item on failed cells"
-                  checked={cellOutputFeatures.explain_error.enabled}
-                  disabled={cellOutputFeatures.explain_error.locked}
-                  tooltip={
-                    cellOutputFeatures.explain_error.locked
-                      ? 'Locked by your administrator'
-                      : ''
-                  }
+                  checked={featurePolicies.explain_error.enabled}
+                  disabled={featurePolicies.explain_error.locked}
+                  tooltip={lockedTip(featurePolicies.explain_error.locked)}
                   onClick={toggleExplainError}
                 />
               </div>
@@ -666,13 +709,9 @@ function SettingsPanelComponentGeneral(props: any) {
                 <CheckBoxItem
                   label="Ask about cell outputs"
                   title="Right-click a cell output to attach it to the chat"
-                  checked={cellOutputFeatures.output_followup.enabled}
-                  disabled={cellOutputFeatures.output_followup.locked}
-                  tooltip={
-                    cellOutputFeatures.output_followup.locked
-                      ? 'Locked by your administrator'
-                      : ''
-                  }
+                  checked={featurePolicies.output_followup.enabled}
+                  disabled={featurePolicies.output_followup.locked}
+                  tooltip={lockedTip(featurePolicies.output_followup.locked)}
                   onClick={toggleOutputFollowup}
                 />
               </div>
@@ -682,13 +721,9 @@ function SettingsPanelComponentGeneral(props: any) {
                 <CheckBoxItem
                   label="Show output toolbar"
                   title="Show a hover toolbar over cell outputs with Explain / Ask / Troubleshoot buttons"
-                  checked={cellOutputFeatures.output_toolbar.enabled}
-                  disabled={cellOutputFeatures.output_toolbar.locked}
-                  tooltip={
-                    cellOutputFeatures.output_toolbar.locked
-                      ? 'Locked by your administrator'
-                      : ''
-                  }
+                  checked={featurePolicies.output_toolbar.enabled}
+                  disabled={featurePolicies.output_toolbar.locked}
+                  tooltip={lockedTip(featurePolicies.output_toolbar.locked)}
                   onClick={toggleOutputToolbar}
                 />
               </div>
@@ -998,6 +1033,7 @@ function SettingsPanelComponentClaude(props: any) {
     nbiConfig.claudeModels
   );
   const [loadingModels, setLoadingModels] = useState(false);
+  const { featurePolicies, settingLocks } = useNbiPolicies();
 
   useEffect(() => {
     const handler = () => {
@@ -1106,7 +1142,12 @@ function SettingsPanelComponentClaude(props: any) {
                     <CheckBoxItem
                       header={true}
                       label="Enable Claude mode"
-                      checked={claudeEnabled}
+                      checked={checkedValue(
+                        featurePolicies.claude_mode,
+                        claudeEnabled
+                      )}
+                      disabled={featurePolicies.claude_mode.locked}
+                      tooltip={lockedTip(featurePolicies.claude_mode.locked)}
                       onClick={() => {
                         setClaudeEnabled(!claudeEnabled);
                       }}
@@ -1139,9 +1180,10 @@ function SettingsPanelComponentClaude(props: any) {
               <div className="model-config-section-row">
                 <div className="model-config-section-column">
                   <div>Chat model</div>
-                  <div>
+                  <div title={lockedTip(settingLocks.claude_chat_model.locked)}>
                     <select
                       className="jp-mod-styled"
+                      disabled={settingLocks.claude_chat_model.locked}
                       onChange={event => setChatModel(event.target.value)}
                     >
                       <option
@@ -1164,9 +1206,16 @@ function SettingsPanelComponentClaude(props: any) {
                 </div>
                 <div className="model-config-section-column">
                   <div>Auto-complete model</div>
-                  <div>
+                  <div
+                    title={lockedTip(
+                      settingLocks.claude_inline_completion_model.locked
+                    )}
+                  >
                     <select
                       className="jp-mod-styled"
+                      disabled={
+                        settingLocks.claude_inline_completion_model.locked
+                      }
                       onChange={event =>
                         setInlineCompletionModel(event.target.value)
                       }
@@ -1222,7 +1271,16 @@ function SettingsPanelComponentClaude(props: any) {
                     <CheckBoxItem
                       header={true}
                       label="User"
-                      checked={settingSources.includes('user')}
+                      checked={checkedValue(
+                        featurePolicies.claude_setting_source_user,
+                        settingSources.includes('user')
+                      )}
+                      disabled={
+                        featurePolicies.claude_setting_source_user.locked
+                      }
+                      tooltip={lockedTip(
+                        featurePolicies.claude_setting_source_user.locked
+                      )}
                       onClick={() => {
                         setSettingSources(
                           settingSources.includes('user')
@@ -1240,7 +1298,16 @@ function SettingsPanelComponentClaude(props: any) {
                     <CheckBoxItem
                       header={true}
                       label="Project (Jupyter root directory)"
-                      checked={settingSources.includes('project')}
+                      checked={checkedValue(
+                        featurePolicies.claude_setting_source_project,
+                        settingSources.includes('project')
+                      )}
+                      disabled={
+                        featurePolicies.claude_setting_source_project.locked
+                      }
+                      tooltip={lockedTip(
+                        featurePolicies.claude_setting_source_project.locked
+                      )}
                       onClick={() => {
                         setSettingSources(
                           settingSources.includes('project')
@@ -1266,8 +1333,14 @@ function SettingsPanelComponentClaude(props: any) {
                     <CheckBoxItem
                       header={true}
                       label="Claude Code tools"
-                      checked={tools.includes(ClaudeToolType.ClaudeCodeTools)}
+                      checked={checkedValue(
+                        featurePolicies.claude_code_tools,
+                        tools.includes(ClaudeToolType.ClaudeCodeTools)
+                      )}
                       disabled={true}
+                      tooltip={lockedTip(
+                        featurePolicies.claude_code_tools.locked
+                      )}
                       onClick={() => {
                         setTools(
                           tools.includes(ClaudeToolType.ClaudeCodeTools)
@@ -1286,7 +1359,14 @@ function SettingsPanelComponentClaude(props: any) {
                     <CheckBoxItem
                       header={true}
                       label="Jupyter UI tools"
-                      checked={tools.includes(ClaudeToolType.JupyterUITools)}
+                      checked={checkedValue(
+                        featurePolicies.claude_jupyter_ui_tools,
+                        tools.includes(ClaudeToolType.JupyterUITools)
+                      )}
+                      disabled={featurePolicies.claude_jupyter_ui_tools.locked}
+                      tooltip={lockedTip(
+                        featurePolicies.claude_jupyter_ui_tools.locked
+                      )}
                       onClick={() => {
                         setTools(
                           tools.includes(ClaudeToolType.JupyterUITools)
@@ -1315,7 +1395,16 @@ function SettingsPanelComponentClaude(props: any) {
                     <CheckBoxItem
                       header={true}
                       label="Remember conversation history"
-                      checked={continueConversation}
+                      checked={checkedValue(
+                        featurePolicies.claude_continue_conversation,
+                        continueConversation
+                      )}
+                      disabled={
+                        featurePolicies.claude_continue_conversation.locked
+                      }
+                      tooltip={lockedTip(
+                        featurePolicies.claude_continue_conversation.locked
+                      )}
                       onClick={() => {
                         setContinueConversation(!continueConversation);
                       }}
@@ -1337,10 +1426,16 @@ function SettingsPanelComponentClaude(props: any) {
                     </div>
                     <input
                       name="chat-model-id-input"
-                      placeholder="API Key"
+                      placeholder={
+                        settingLocks.claude_api_key.locked
+                          ? 'Locked by ANTHROPIC_API_KEY'
+                          : 'API Key'
+                      }
                       className="jp-mod-styled"
                       spellCheck={false}
-                      value={apiKey}
+                      value={settingLocks.claude_api_key.locked ? '' : apiKey}
+                      disabled={settingLocks.claude_api_key.locked}
+                      title={lockedTip(settingLocks.claude_api_key.locked)}
                       onChange={event => setApiKey(event.target.value)}
                     />
                   </div>
@@ -1350,10 +1445,16 @@ function SettingsPanelComponentClaude(props: any) {
                     </div>
                     <input
                       name="chat-model-id-input"
-                      placeholder="https://api.anthropic.com"
+                      placeholder={
+                        settingLocks.claude_base_url.locked
+                          ? 'Locked by ANTHROPIC_BASE_URL'
+                          : 'https://api.anthropic.com'
+                      }
                       className="jp-mod-styled"
                       spellCheck={false}
                       value={baseUrl}
+                      disabled={settingLocks.claude_base_url.locked}
+                      title={lockedTip(settingLocks.claude_base_url.locked)}
                       onChange={event => setBaseUrl(event.target.value)}
                     />
                   </div>
