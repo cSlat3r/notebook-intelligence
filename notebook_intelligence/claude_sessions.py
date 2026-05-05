@@ -201,6 +201,7 @@ def _extract_preview(obj: dict) -> str:
 
 
 def list_all_sessions(
+    cwd: Optional[str] = None,
     claude_home: Optional[str] = None,
 ) -> list[ClaudeSessionInfo]:
     """List all resumable Claude sessions across all projects, newest first.
@@ -210,6 +211,10 @@ def list_all_sessions(
     Each session is enriched with its ``cwd`` (project path) so callers
     can run ``claude --resume <id>`` from the correct directory.
 
+    If ``cwd`` is provided, sessions from that project directory are also
+    included (e.g. NBI Claude Mode sessions that may not appear in
+    ``history.jsonl``). Results are de-duplicated by session ID.
+
     Sessions are de-duplicated by session ID and sorted by most recent
     activity. Only sessions whose ``.jsonl`` transcript file still exists
     in ``~/.claude/projects/`` are returned.
@@ -218,6 +223,11 @@ def list_all_sessions(
     history_path = home / "history.jsonl"
 
     if not history_path.exists():
+        if cwd:
+            sessions = list_sessions(cwd, claude_home=claude_home)
+            for s in sessions:
+                s.cwd = cwd
+            return sessions
         return []
 
     # Build index: session_id -> .jsonl path for existence check.
@@ -264,6 +274,11 @@ def list_all_sessions(
                         seen[session_id]["last_ts"] = ts
     except OSError as exc:
         log.warning("Could not read Claude history file %s: %s", history_path, exc)
+        if cwd:
+            sessions = list_sessions(cwd, claude_home=claude_home)
+            for s in sessions:
+                s.cwd = cwd
+            return sessions
         return []
 
     sessions: list[ClaudeSessionInfo] = []
@@ -287,6 +302,16 @@ def list_all_sessions(
             preview=preview,
             cwd=data["project"],
         ))
+
+    # Merge in cwd-scoped sessions (e.g. NBI Claude Mode sessions that may
+    # not appear in history.jsonl), deduplicating by session_id.
+    if cwd:
+        existing_ids = {s.session_id for s in sessions}
+        for s in list_sessions(cwd, claude_home=claude_home):
+            if s.session_id not in existing_ids:
+                s.cwd = cwd
+                sessions.append(s)
+                existing_ids.add(s.session_id)
 
     sessions.sort(key=lambda s: s.modified_at, reverse=True)
     return sessions

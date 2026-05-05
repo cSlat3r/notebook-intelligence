@@ -800,7 +800,7 @@ class ClaudeSessionsAllHandler(APIHandler):
     @tornado.web.authenticated
     def get(self):
         try:
-            sessions = list_all_claude_sessions()
+            sessions = list_all_claude_sessions(cwd=get_jupyter_root_dir())
             self.finish(json.dumps({
                 "sessions": [asdict(s) for s in sessions],
             }))
