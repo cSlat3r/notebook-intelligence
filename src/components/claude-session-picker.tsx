@@ -9,13 +9,13 @@ import React, {
 } from 'react';
 import { VscCheck, VscClose, VscCopy, VscHistory } from 'react-icons/vsc';
 
-import { IClaudeSessionInfo, NBIAPI } from '../api';
+import { IClaudeSessionInfo, IClaudeSessionList, NBIAPI } from '../api';
 import { buildResumeCommand, writeTextToClipboard } from '../utils';
 
 export interface IClaudeSessionPickerProps {
   onResume: (session: IClaudeSessionInfo) => void;
   onClose: () => void;
-  fetchSessions?: () => Promise<IClaudeSessionInfo[]>;
+  fetchSessions?: () => Promise<IClaudeSessionList>;
 }
 
 function formatTimestamp(epochSeconds: number): string {
