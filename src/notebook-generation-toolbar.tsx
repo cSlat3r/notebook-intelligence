@@ -245,9 +245,10 @@ class NotebookGenerationToolbarController {
   private _statusHideTimer: ReturnType<typeof setTimeout> | null = null;
 }
 
-export class NotebookGenerationToolbarExtension
-  implements DocumentRegistry.IWidgetExtension<NotebookPanel, INotebookModel>
-{
+export class NotebookGenerationToolbarExtension implements DocumentRegistry.IWidgetExtension<
+  NotebookPanel,
+  INotebookModel
+> {
   constructor(options: INotebookGenerationToolbarOptions) {
     this._options = options;
   }

@@ -54,7 +54,12 @@ import {
   InlinePromptWidget,
   RunChatCompletionType
 } from './chat-sidebar';
-import { CellOutputActionFlag, NBIAPI, GitHubCopilotLoginStatus, IClaudeSessionInfo } from './api';
+import {
+  CellOutputActionFlag,
+  NBIAPI,
+  GitHubCopilotLoginStatus,
+  IClaudeSessionInfo
+} from './api';
 import { CellOutputHoverToolbar } from './cell-output-toolbar';
 import {
   BackendMessageType,
@@ -358,9 +363,7 @@ class ActiveDocumentWatcher {
   private static _languageRegistry: IEditorLanguageRegistry;
 }
 
-class NBIInlineCompletionProvider
-  implements IInlineCompletionProvider<IInlineCompletionItem>
-{
+class NBIInlineCompletionProvider implements IInlineCompletionProvider<IInlineCompletionItem> {
   constructor(telemetryEmitter: TelemetryEmitter) {
     this._telemetryEmitter = telemetryEmitter;
   }
