@@ -9,6 +9,7 @@ from notebook_intelligence.claude_sessions import (
     encode_cwd,
     get_sessions_dir,
     list_sessions,
+    list_all_sessions,
 )
 
 
@@ -317,3 +318,73 @@ class TestListSessions:
 
         result = list_sessions(project_cwd, claude_home=str(fake_claude_home))
         assert result[0].preview == "actual prompt"
+
+
+def _history_line(session_id: str, project: str, ts: int, display: str) -> dict:
+    return {
+        "sessionId": session_id,
+        "project": project,
+        "timestamp": ts,
+        "display": display,
+    }
+
+
+class TestListAllSessions:
+    def test_returns_empty_when_no_history(self, fake_claude_home):
+        result = list_all_sessions(claude_home=str(fake_claude_home))
+        assert result == []
+
+    def test_returns_cwd_sessions_when_history_missing(
+        self, fake_claude_home, sessions_dir, project_cwd
+    ):
+        _write_jsonl(
+            sessions_dir / "s1.jsonl", [_user_line("s1", "nbi session")]
+        )
+        result = list_all_sessions(cwd=project_cwd, claude_home=str(fake_claude_home))
+        assert len(result) == 1
+        assert result[0].session_id == "s1"
+        assert result[0].cwd == project_cwd
+
+    def test_merges_cwd_sessions_not_in_history(
+        self, fake_claude_home, sessions_dir, project_cwd
+    ):
+        # history.jsonl has session "hist-only"
+        history_path = fake_claude_home / "history.jsonl"
+        hist_jsonl = sessions_dir / "hist-only.jsonl"
+        _write_jsonl(hist_jsonl, [_user_line("hist-only", "from history")])
+        with history_path.open("w") as fh:
+            fh.write(
+                json.dumps(
+                    _history_line("hist-only", project_cwd, 2_000_000_000_000, "from history")
+                )
+                + "\n"
+            )
+
+        # cwd dir also has "nbi-only" which is not in history.jsonl
+        _write_jsonl(
+            sessions_dir / "nbi-only.jsonl", [_user_line("nbi-only", "nbi session")]
+        )
+
+        result = list_all_sessions(cwd=project_cwd, claude_home=str(fake_claude_home))
+        ids = [s.session_id for s in result]
+        assert "hist-only" in ids
+        assert "nbi-only" in ids
+
+    def test_deduplicates_sessions_in_both_sources(
+        self, fake_claude_home, sessions_dir, project_cwd
+    ):
+        session_id = "shared"
+        jsonl_path = sessions_dir / f"{session_id}.jsonl"
+        _write_jsonl(jsonl_path, [_user_line(session_id, "shared session")])
+
+        history_path = fake_claude_home / "history.jsonl"
+        with history_path.open("w") as fh:
+            fh.write(
+                json.dumps(
+                    _history_line(session_id, project_cwd, 1_000_000_000_000, "shared session")
+                )
+                + "\n"
+            )
+
+        result = list_all_sessions(cwd=project_cwd, claude_home=str(fake_claude_home))
+        assert len([s for s in result if s.session_id == session_id]) == 1
