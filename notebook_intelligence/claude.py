@@ -21,7 +21,7 @@ import logging
 from claude_agent_sdk import AssistantMessage, PermissionResultAllow, PermissionResultDeny, TextBlock, UserMessage, create_sdk_mcp_server, ClaudeAgentOptions, ClaudeSDKClient, tool
 from anthropic.types.text_block import TextBlock as AnthropicTextBlock
 
-from notebook_intelligence.util import ThreadSafeWebSocketConnector, get_jupyter_root_dir
+from notebook_intelligence.util import ThreadSafeWebSocketConnector, _emit, get_jupyter_root_dir
 
 log = logging.getLogger(__name__)
 
@@ -346,6 +346,8 @@ class ClaudeCodeClient():
         self._connect_lock = threading.Lock()
         self._reconnect_required = False
         self._continue_conversation: bool | None = None
+        # One-shot, cleared after _create_client applies it.
+        self._resume_session_id: str | None = None
         # Connect on a background thread so JupyterLab's startup path isn't
         # blocked by the synchronous SDK handshake (#163). Callers that need
         # to wait for readiness (e.g. _ensure_connected from a chat request)
@@ -523,7 +525,11 @@ class ClaudeCodeClient():
                 set_current_claude_client(client)
 
                 while True:
-                    event = self._client_queue.get(block=True)
+                    queue = self._client_queue
+                    signal = self._client_thread_signal
+                    if queue is None:
+                        return
+                    event = queue.get(block=True)
                     event_id = event["id"]
                     event_type = event["type"]
                     if event_type == ClaudeAgentEventType.Query:
@@ -581,10 +587,7 @@ class ClaudeCodeClient():
                             if not self._reconnect_required:
                                 response.stream(MarkdownData(err_msg))
                         finally:
-                            self._client_thread_signal.emit({
-                                "id": event_id,
-                                "data": "query completed"
-                            })
+                            _emit(signal, {"id": event_id, "data": "query completed"})
                             set_current_request(None)
                             set_current_response(None)
                     elif event_type == ClaudeAgentEventType.GetServerInfo:
@@ -594,10 +597,7 @@ class ClaudeCodeClient():
                             log.error(f"Error occurred while getting server info: {str(e)}")
                             server_info = None
                         finally:
-                            self._client_thread_signal.emit({
-                                "id": event_id,
-                                "data": server_info
-                            })
+                            _emit(signal, {"id": event_id, "data": server_info})
                     elif event_type == ClaudeAgentEventType.ClearChatHistory:
                         try:
                            await client.query('/clear')
@@ -607,15 +607,9 @@ class ClaudeCodeClient():
                         except Exception as e:
                             log.error(f"Error occurred while clearing chat history: {str(e)}")
                         finally:
-                            self._client_thread_signal.emit({
-                                "id": event_id,
-                                "data": "chat history cleared"
-                            })
+                            _emit(signal, {"id": event_id, "data": "chat history cleared"})
                     elif event_type == ClaudeAgentEventType.StopClient:
-                        self._client_thread_signal.emit({
-                            "id": event_id,
-                            "data": "stopped"
-                        })
+                        _emit(signal, {"id": event_id, "data": "stopped"})
                         return
                     else:
                         log.error(f"Unknown event type {event}")
@@ -629,6 +623,15 @@ class ClaudeCodeClient():
         continue_conversation_cfg = self._host.nbi_config.claude_settings.get('continue_conversation', False)
         self._client_options.continue_conversation = self._continue_conversation if self._continue_conversation is not None else continue_conversation_cfg
         self._continue_conversation = None
+
+        # resume overrides continue_conversation: always start from the
+        # chosen transcript, never the most recent one.
+        if self._resume_session_id is not None:
+            self._client_options.resume = self._resume_session_id
+            self._client_options.continue_conversation = False
+            self._resume_session_id = None
+        else:
+            self._client_options.resume = None
 
         return ClaudeSDKClient(options=self._client_options)
 
@@ -789,6 +792,16 @@ class ClaudeCodeClient():
     def reconnect(self):
         self.disconnect()
         self.connect()
+
+    def resume_session(self, session_id: str) -> None:
+        """Reconnect the Claude client so the next query resumes ``session_id``.
+
+        Raises ``ValueError`` if ``session_id`` is empty.
+        """
+        if not session_id:
+            raise ValueError("session_id must be a non-empty string")
+        self._resume_session_id = session_id
+        self.reconnect()
 
 
 @tool("create-new-notebook", "Creates a new empty notebook.", {})
@@ -1252,6 +1265,9 @@ If you need to install a Python package within a notebook cell code, use %pip in
         claude_enabled = self._host.nbi_config.claude_settings.get('enabled', False)
         if claude_enabled:
             self._client.connect()
+
+    def resume_session(self, session_id: str) -> None:
+        self._client.resume_session(session_id)
 
     def update_client_debounced(self):
         if self._update_client_debounced_timer is not None:

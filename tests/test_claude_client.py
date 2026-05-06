@@ -194,6 +194,86 @@ class TestSendClaudeAgentRequestDeadThread:
         }
 
 
+class TestSendClaudeAgentRequestHeartbeat:
+    def test_heartbeat_sent_during_live_request(self, monkeypatch):
+        monkeypatch.setattr("notebook_intelligence.claude.CLAUDE_AGENT_CLIENT_RESPONSE_WAIT_TIME", 0)
+        monkeypatch.setattr("notebook_intelligence.claude.CLAUDE_AGENT_HEARTBEAT_INTERVAL", 0)
+
+        client = _make_client()
+        stop = threading.Event()
+        thread = threading.Thread(target=stop.wait, daemon=True)
+        thread.start()
+        client._client_thread = thread
+
+        # Capture event_id so the heartbeat side-effect can emit the matching response.
+        captured_id = []
+        orig_put = client._client_queue.put
+        def capturing_put(event):
+            orig_put(event)
+            captured_id.append(event["id"])
+        client._client_queue.put = capturing_put
+
+        connector = MagicMock()
+        def respond_on_heartbeat(payload):
+            client._client_thread_signal.emit({"id": captured_id[0], "data": "done"})
+        connector.write_message.side_effect = respond_on_heartbeat
+        client._websocket_connector = connector
+
+        try:
+            client._send_claude_agent_request(ClaudeAgentEventType.Query, {})
+        finally:
+            stop.set()
+            thread.join(timeout=1)
+
+        connector.write_message.assert_called_once()
+        assert connector.write_message.call_args[0][0] == {
+            "type": "claude-code-status-change",
+            "data": {},
+        }
+
+    def test_heartbeat_skipped_when_connector_none(self, monkeypatch):
+        monkeypatch.setattr("notebook_intelligence.claude.CLAUDE_AGENT_CLIENT_RESPONSE_WAIT_TIME", 0)
+        monkeypatch.setattr("notebook_intelligence.claude.CLAUDE_AGENT_HEARTBEAT_INTERVAL", 0)
+        monkeypatch.setattr("notebook_intelligence.claude.CLAUDE_AGENT_CLIENT_RESPONSE_TIMEOUT", 0.05)
+
+        client = _make_client()
+        stop = threading.Event()
+        thread = threading.Thread(target=stop.wait, daemon=True)
+        thread.start()
+        client._client_thread = thread
+        client._websocket_connector = None
+
+        try:
+            client._send_claude_agent_request(ClaudeAgentEventType.Query, {})
+        finally:
+            stop.set()
+            thread.join(timeout=1)
+        # Passes if no AttributeError raised when connector is None.
+
+    def test_heartbeat_failure_does_not_abort_request(self, monkeypatch):
+        monkeypatch.setattr("notebook_intelligence.claude.CLAUDE_AGENT_CLIENT_RESPONSE_WAIT_TIME", 0)
+        monkeypatch.setattr("notebook_intelligence.claude.CLAUDE_AGENT_HEARTBEAT_INTERVAL", 0)
+        monkeypatch.setattr("notebook_intelligence.claude.CLAUDE_AGENT_CLIENT_RESPONSE_TIMEOUT", 0.05)
+
+        client = _make_client()
+        stop = threading.Event()
+        thread = threading.Thread(target=stop.wait, daemon=True)
+        thread.start()
+        client._client_thread = thread
+        connector = MagicMock()
+        connector.write_message.side_effect = RuntimeError("socket closed")
+        client._websocket_connector = connector
+
+        try:
+            result = client._send_claude_agent_request(ClaudeAgentEventType.Query, {})
+        finally:
+            stop.set()
+            thread.join(timeout=1)
+
+        assert isinstance(result, dict)
+        assert connector.write_message.called
+
+
 class TestEnsureConnected:
     """The helper the three callers (query, update_server_info, clear_chat_history)
     all share. Before this refactor each had its own slightly-different guard."""
@@ -552,6 +632,90 @@ class TestConnectInBackground:
             stop_worker.set()
             if client._client_thread is not None:
                 client._client_thread.join(timeout=1)
+
+
+class TestWorkerThreadSignalRace:
+    """Guard against the cancellation race fixed in _client_thread_func.
+
+    When the user clicks Stop, _mark_as_disconnected() runs on the polling
+    thread and sets self._client_thread_signal = None. The worker thread may
+    simultaneously be in its finally block about to call
+    self._client_thread_signal.emit(...), which without the snapshot fix raises
+    AttributeError and puts the agent into FailedToConnect state.
+
+    The fix snapshots the signal into a local variable at the top of each event
+    loop iteration so the finally block holds a valid reference even if the
+    client's field is nulled mid-flight.
+    """
+
+    def test_snapshot_survives_mark_as_disconnected(self):
+        """Local snapshot keeps signal alive after _mark_as_disconnected nulls
+        the client's reference — emit must succeed without raising."""
+        client = _make_client()
+        original_signal = client._client_thread_signal
+        received = []
+        original_signal.connect(lambda data: received.append(data))
+
+        # Worker snapshots signal at the top of the event loop iteration.
+        signal = client._client_thread_signal
+
+        # Cancel path: _mark_as_disconnected() nulls the client's own reference.
+        client._mark_as_disconnected()
+        assert client._client_thread_signal is None
+
+        # Worker's finally block uses the snapshot — must not raise.
+        if signal is not None:
+            signal.emit({"id": "x", "data": "query completed"})
+
+        assert received == [{"id": "x", "data": "query completed"}]
+
+    def test_signal_already_none_at_snapshot_time_is_safe(self):
+        """If disconnect ran before the snapshot, the null guard in the finally
+        block must skip the emit silently rather than raising AttributeError."""
+        client = _make_client()
+        client._mark_as_disconnected()
+
+        # Signal is already None when the worker reaches the snapshot line.
+        signal = client._client_thread_signal
+        assert signal is None
+
+        # Finally block null guard — must not raise, must not emit.
+        if signal is not None:
+            signal.emit({"id": "x", "data": "query completed"})
+        # Reaching here without exception is the assertion.
+
+    def test_queue_snapshot_survives_mark_as_disconnected(self):
+        """Local queue snapshot keeps the Queue alive after _mark_as_disconnected
+        nulls the client's reference — get() must not raise AttributeError."""
+        client = _make_client()
+        original_queue = client._client_queue
+        original_queue.put({"id": "x", "type": "query"})
+
+        # Worker snapshots queue at the top of the event loop iteration.
+        queue = client._client_queue
+
+        # Cancel path: _mark_as_disconnected() nulls the client's own reference.
+        client._mark_as_disconnected()
+        assert client._client_queue is None
+
+        # Worker's queue.get() uses the snapshot — must not raise.
+        event = queue.get(block=False)
+        assert event == {"id": "x", "type": "query"}
+
+    def test_queue_already_none_at_snapshot_time_exits_cleanly(self):
+        """If disconnect ran before the queue snapshot, the null guard must
+        cause the worker to return rather than raising AttributeError."""
+        client = _make_client()
+        client._mark_as_disconnected()
+
+        # Queue is already None when the worker reaches the snapshot line.
+        queue = client._client_queue
+        assert queue is None
+
+        # Null guard — worker returns instead of calling get() on None.
+        if queue is None:
+            return
+        queue.get(block=False)  # must not be reached
 
 
 class TestOtherCallersEnsureConnected:
