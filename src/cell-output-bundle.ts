@@ -87,9 +87,13 @@ export function cellOutputAsContextBundle(
     // DataFrames render as both text/html and text/plain; prefer the plain
     // form — it's the formatted ASCII table, cheaper, and an LLM reads it
     // just fine. text/html alone is stripped to plain text below.
-    if (data['text/plain']) {
+    // Use ``in`` rather than truthy check: an empty array ``[]`` is legal
+    // (if rare) nbformat for ``text/plain`` but falsy in JS, which would
+    // otherwise let the html branch fire over an explicit-but-empty plain
+    // entry.
+    if ('text/plain' in data) {
       pushBundle('text/plain', joinMultilineString(data['text/plain']));
-    } else if (data['text/html']) {
+    } else if ('text/html' in data) {
       pushBundle(
         'text/html',
         stripHtml(joinMultilineString(data['text/html']))
