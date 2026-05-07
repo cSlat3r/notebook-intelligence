@@ -8,7 +8,7 @@ For each release we list user-facing changes grouped as **Added**, **Changed**, 
 
 <!-- <START NEW CHANGELOG ENTRY> -->
 
-## [4.7.0] — unreleased
+## [4.7.0] — 2026-05-07
 
 ### Added
 
