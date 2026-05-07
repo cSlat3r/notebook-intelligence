@@ -44,6 +44,25 @@ For each release we list user-facing changes grouped as **Added**, **Changed**, 
 
 <!-- <END NEW CHANGELOG ENTRY> -->
 
+## [4.6.0] — 2026-04-29
+
+### Added
+
+- **Claude Skills management panel** — Settings now exposes a **Skills** tab for managing the bundles Claude can invoke (SKILL.md frontmatter, helper files, allowed tools). Skills resolve from `~/.claude/skills/` (user) and `<project>/.claude/skills/` (project) — the same locations the Claude CLI reads. Inline editor, duplicate / rename / delete with undo, and import-from-GitHub via the public tarball API. For organization deployments, NBI can install a curated set from a YAML manifest pointed at by `NBI_SKILLS_MANIFEST` and keep them in sync; managed skills are read-only in the UI. See [`docs/skills.md`](docs/skills.md) for the full reference.
+- Restructured documentation: `README.md` rewritten with a TOC and concept glossary, plus new `SECURITY.md`, `PRIVACY.md`, and operator guides under `docs/` (`admin-guide.md`, `rulesets.md`, `skills.md`, `troubleshooting.md`).
+
+### Fixed
+
+- **Windows Claude mode reliability** — Claude agent thread now uses the Proactor event loop on Windows, fixing subprocess spawn failures and intermittent "Claude agent not connected" races at startup. The Claude SDK retry path also reconnects when the worker thread has died instead of waiting out the full response timeout.
+- Anthropic credentials are normalized (whitespace + scheme handling) before being passed to the SDK.
+- Skill imports from GitHub reject tarball entries with absolute paths or `../` traversal — a malicious or buggy bundle can no longer write outside its install directory.
+- `_send_claude_agent_request` guarded against the disconnect race that left chat handlers waiting on a closed queue.
+- WebSocket message handlers are disconnected when the originating request finishes; previously they accumulated for the lifetime of the WebSocket.
+- `configChanged` handlers are disconnected when components unmount, fixing a slow leak when the chat sidebar was opened and closed repeatedly.
+- Claude session picker list scrolls correctly when the transcript count exceeds the visible area.
+
+<!-- This entry was filled in retroactively after the 4.6.0 tag shipped. -->
+
 ## [4.5.0] — 2026-04-09
 
 ### Added
@@ -164,6 +183,7 @@ For each release we list user-facing changes grouped as **Added**, **Changed**, 
 
 [unreleased]: https://github.com/notebook-intelligence/notebook-intelligence/compare/v4.7.0...HEAD
 [4.7.0]: https://github.com/notebook-intelligence/notebook-intelligence/compare/v4.6.0...v4.7.0
+[4.6.0]: https://github.com/notebook-intelligence/notebook-intelligence/compare/v4.5.0...v4.6.0
 [4.5.0]: https://github.com/notebook-intelligence/notebook-intelligence/compare/v4.4.0...v4.5.0
 [4.4.0]: https://github.com/notebook-intelligence/notebook-intelligence/compare/v4.3.2...v4.4.0
 [4.3.2]: https://github.com/notebook-intelligence/notebook-intelligence/compare/v4.3.1...v4.3.2
