@@ -194,6 +194,86 @@ class TestSendClaudeAgentRequestDeadThread:
         }
 
 
+class TestSendClaudeAgentRequestHeartbeat:
+    def test_heartbeat_sent_during_live_request(self, monkeypatch):
+        monkeypatch.setattr("notebook_intelligence.claude.CLAUDE_AGENT_CLIENT_RESPONSE_WAIT_TIME", 0)
+        monkeypatch.setattr("notebook_intelligence.claude.CLAUDE_AGENT_HEARTBEAT_INTERVAL", 0)
+
+        client = _make_client()
+        stop = threading.Event()
+        thread = threading.Thread(target=stop.wait, daemon=True)
+        thread.start()
+        client._client_thread = thread
+
+        # Capture event_id so the heartbeat side-effect can emit the matching response.
+        captured_id = []
+        orig_put = client._client_queue.put
+        def capturing_put(event):
+            orig_put(event)
+            captured_id.append(event["id"])
+        client._client_queue.put = capturing_put
+
+        connector = MagicMock()
+        def respond_on_heartbeat(payload):
+            client._client_thread_signal.emit({"id": captured_id[0], "data": "done"})
+        connector.write_message.side_effect = respond_on_heartbeat
+        client._websocket_connector = connector
+
+        try:
+            client._send_claude_agent_request(ClaudeAgentEventType.Query, {})
+        finally:
+            stop.set()
+            thread.join(timeout=1)
+
+        connector.write_message.assert_called_once()
+        assert connector.write_message.call_args[0][0] == {
+            "type": "claude-code-heartbeat",
+            "data": {},
+        }
+
+    def test_heartbeat_skipped_when_connector_none(self, monkeypatch):
+        monkeypatch.setattr("notebook_intelligence.claude.CLAUDE_AGENT_CLIENT_RESPONSE_WAIT_TIME", 0)
+        monkeypatch.setattr("notebook_intelligence.claude.CLAUDE_AGENT_HEARTBEAT_INTERVAL", 0)
+        monkeypatch.setattr("notebook_intelligence.claude.CLAUDE_AGENT_CLIENT_RESPONSE_TIMEOUT", 0.05)
+
+        client = _make_client()
+        stop = threading.Event()
+        thread = threading.Thread(target=stop.wait, daemon=True)
+        thread.start()
+        client._client_thread = thread
+        client._websocket_connector = None
+
+        try:
+            client._send_claude_agent_request(ClaudeAgentEventType.Query, {})
+        finally:
+            stop.set()
+            thread.join(timeout=1)
+        # Passes if no AttributeError raised when connector is None.
+
+    def test_heartbeat_failure_does_not_abort_request(self, monkeypatch):
+        monkeypatch.setattr("notebook_intelligence.claude.CLAUDE_AGENT_CLIENT_RESPONSE_WAIT_TIME", 0)
+        monkeypatch.setattr("notebook_intelligence.claude.CLAUDE_AGENT_HEARTBEAT_INTERVAL", 0)
+        monkeypatch.setattr("notebook_intelligence.claude.CLAUDE_AGENT_CLIENT_RESPONSE_TIMEOUT", 0.05)
+
+        client = _make_client()
+        stop = threading.Event()
+        thread = threading.Thread(target=stop.wait, daemon=True)
+        thread.start()
+        client._client_thread = thread
+        connector = MagicMock()
+        connector.write_message.side_effect = RuntimeError("socket closed")
+        client._websocket_connector = connector
+
+        try:
+            result = client._send_claude_agent_request(ClaudeAgentEventType.Query, {})
+        finally:
+            stop.set()
+            thread.join(timeout=1)
+
+        assert isinstance(result, dict)
+        assert connector.write_message.called
+
+
 class TestEnsureConnected:
     """The helper the three callers (query, update_server_info, clear_chat_history)
     all share. Before this refactor each had its own slightly-different guard."""
