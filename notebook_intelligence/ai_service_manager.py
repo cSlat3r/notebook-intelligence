@@ -8,7 +8,7 @@ import sys
 from typing import Dict, Optional
 import logging
 from notebook_intelligence import github_copilot
-from notebook_intelligence.api import ButtonData, ChatModel, EmbeddingModel, InlineCompletionModel, LLMProvider, ChatParticipant, ChatRequest, ChatResponse, CompletionContext, ContextRequest, Host, CompletionContextProvider, MCPPrompt, MCPServer, MarkdownData, NotebookIntelligenceExtension, TelemetryEvent, TelemetryListener, Tool, Toolset
+from notebook_intelligence.api import ButtonData, ChatModel, EmbeddingModel, InlineCompletionModel, LLMProvider, ChatParticipant, ChatRequest, ChatResponse, CompletionContext, ContextRequest, Host, CompletionContextProvider, MCPPrompt, MCPServer, MarkdownData, NotebookIntelligenceExtension, RegistrationError, TelemetryEvent, TelemetryListener, Tool, Toolset
 from notebook_intelligence.base_chat_participant import BaseChatParticipant
 from notebook_intelligence.config import NBIConfig
 from notebook_intelligence.github_copilot_chat_participant import GithubCopilotChatParticipant
@@ -223,11 +223,9 @@ class AIServiceManager(Host):
 
     def register_chat_participant(self, participant: ChatParticipant):
         if participant.id in RESERVED_PARTICIPANT_IDS:
-            log.error(f"Participant ID '{participant.id}' is reserved!")
-            return
+            raise RegistrationError(f"Participant ID '{participant.id}' is reserved!")
         if participant.id in self.chat_participants:
-            log.error(f"Participant ID '{participant.id}' is already in use!")
-            return
+            raise RegistrationError(f"Participant ID '{participant.id}' is already in use!")
         self.chat_participants[participant.id] = participant
 
     def unregister_chat_participant(self, participant: ChatParticipant):
@@ -236,23 +234,19 @@ class AIServiceManager(Host):
 
     def register_llm_provider(self, provider: LLMProvider) -> None:
         if provider.id in RESERVED_LLM_PROVIDER_IDS:
-            log.error(f"LLM Provider ID '{provider.id}' is reserved!")
-            return
+            raise RegistrationError(f"LLM Provider ID '{provider.id}' is reserved!")
         if provider.id in self.chat_participants:
-            log.error(f"LLM Provider ID '{provider.id}' is already in use!")
-            return
+            raise RegistrationError(f"LLM Provider ID '{provider.id}' is already in use!")
         self.llm_providers[provider.id] = provider
 
     def register_completion_context_provider(self, provider: CompletionContextProvider) -> None:
         if provider.id in self.completion_context_providers:
-            log.error(f"Completion Context Provider ID '{provider.id}' is already in use!")
-            return
+            raise RegistrationError(f"Completion Context Provider ID '{provider.id}' is already in use!")
         self.completion_context_providers[provider.id] = provider
 
     def register_telemetry_listener(self, listener: TelemetryListener) -> None:
         if listener.name in self.telemetry_listeners:
-            log.error(f"Notebook Intelligence telemetry listener '{listener.name}' already exists!")
-            return
+            raise RegistrationError(f"Notebook Intelligence telemetry listener '{listener.name}' already exists!")
         log.warning(f"Notebook Intelligence telemetry listener '{listener.name}' registered. Make sure it is from a trusted source.")
         self.telemetry_listeners[listener.name] = listener
 
