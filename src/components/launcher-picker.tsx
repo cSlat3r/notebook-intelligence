@@ -1,6 +1,12 @@
 // Copyright (c) Mehmet Bektas <mbektasgh@outlook.com>
 
-import React, { useState, useEffect, ChangeEvent, KeyboardEvent } from 'react';
+import React, {
+  ChangeEvent,
+  KeyboardEvent,
+  useEffect,
+  useRef,
+  useState
+} from 'react';
 import { IClaudeSessionInfo, NBIAPI } from '../api';
 
 export interface ILauncherPickerProps {
@@ -14,6 +20,9 @@ export function LauncherPicker({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [filter, setFilter] = useState('');
+  const [highlightedIndex, setHighlightedIndex] = useState(-1);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     NBIAPI.listClaudeSessions('all')
@@ -27,13 +36,85 @@ export function LauncherPicker({
       });
   }, []);
 
+  const needle = filter.toLowerCase();
   const filtered = filter
     ? sessions.filter(
         s =>
-          s.preview?.toLowerCase().includes(filter.toLowerCase()) ||
-          s.cwd?.toLowerCase().includes(filter.toLowerCase())
+          s.preview?.toLowerCase().includes(needle) ||
+          s.cwd?.toLowerCase().includes(needle)
       )
     : sessions;
+
+  // A held-over index against a refetched session set could silently
+  // point at a different session, so reset on any sessions change —
+  // not just length, which would miss equal-length-but-different sets.
+  useEffect(() => {
+    setHighlightedIndex(-1);
+  }, [filter, sessions]);
+
+  useEffect(() => {
+    if (highlightedIndex < 0 || !listRef.current) {
+      return;
+    }
+    const row = listRef.current.children[highlightedIndex] as
+      | HTMLElement
+      | undefined;
+    row?.scrollIntoView({ block: 'nearest' });
+  }, [highlightedIndex]);
+
+  // Refs so the document-level keydown listener installed below can read
+  // the latest values without re-attaching on every render.
+  const filteredRef = useRef(filtered);
+  const highlightedIndexRef = useRef(highlightedIndex);
+  const onSessionSelectedRef = useRef(onSessionSelected);
+  filteredRef.current = filtered;
+  highlightedIndexRef.current = highlightedIndex;
+  onSessionSelectedRef.current = onSessionSelected;
+
+  // Lumino's Dialog catches Enter at capture phase on the dialog node and
+  // triggers its default OK button (the "New Session" button), so a React
+  // bubble-phase handler never sees Enter inside the picker. Attach a
+  // document-capture listener here so we beat the dialog and activate the
+  // highlighted row instead — falling through to the dialog's New Session
+  // path only when there's nothing selectable to land on.
+  useEffect(() => {
+    const handler = (e: globalThis.KeyboardEvent) => {
+      if (e.key !== 'Enter') {
+        return;
+      }
+      const node = containerRef.current;
+      if (!node || !node.contains(e.target as Node)) {
+        return;
+      }
+      const list = filteredRef.current;
+      if (list.length === 0) {
+        return;
+      }
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      const idx = highlightedIndexRef.current;
+      onSessionSelectedRef.current(list[idx >= 0 ? idx : 0]);
+    };
+    document.addEventListener('keydown', handler, { capture: true });
+    return () =>
+      document.removeEventListener('keydown', handler, { capture: true });
+  }, []);
+
+  const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (filtered.length === 0) {
+      return;
+    }
+    // From "no row highlighted" (-1), ArrowDown jumps to the first row
+    // and ArrowUp jumps to the last — each direction lands at its
+    // nearest end so the user always reaches a valid row in one press.
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setHighlightedIndex(i => (i < 0 || i >= filtered.length - 1 ? 0 : i + 1));
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setHighlightedIndex(i => (i <= 0 ? filtered.length - 1 : i - 1));
+    }
+  };
 
   if (loading) {
     return (
@@ -49,8 +130,16 @@ export function LauncherPicker({
       </div>
     );
   }
+  const activeRowId =
+    highlightedIndex >= 0
+      ? `nbi-claude-session-row-${filtered[highlightedIndex].session_id}`
+      : undefined;
   return (
-    <div className="nbi-claude-code-picker-body">
+    <div
+      className="nbi-claude-code-picker-body"
+      ref={containerRef}
+      onKeyDown={handleKeyDown}
+    >
       <input
         className="nbi-claude-code-picker-search"
         type="text"
@@ -60,8 +149,17 @@ export function LauncherPicker({
           setFilter(e.target.value)
         }
         autoFocus
+        role="combobox"
+        aria-expanded={filtered.length > 0}
+        aria-controls="nbi-claude-session-listbox"
+        aria-activedescendant={activeRowId}
       />
-      <div className="nbi-claude-code-picker-list">
+      <div
+        className="nbi-claude-code-picker-list"
+        id="nbi-claude-session-listbox"
+        role="listbox"
+        ref={listRef}
+      >
         {filtered.length === 0 ? (
           <div className="nbi-claude-code-picker-empty">
             {filter
@@ -69,33 +167,38 @@ export function LauncherPicker({
               : 'No previous sessions found.'}
           </div>
         ) : (
-          filtered.map(session => (
-            <div
-              key={session.session_id}
-              className="nbi-claude-code-picker-session"
-              tabIndex={0}
-              onClick={() => onSessionSelected(session)}
-              onKeyPress={(e: KeyboardEvent) => {
-                if (e.key === 'Enter') {
-                  onSessionSelected(session);
+          filtered.map((session, index) => {
+            const isHighlighted = index === highlightedIndex;
+            return (
+              <div
+                key={session.session_id}
+                id={`nbi-claude-session-row-${session.session_id}`}
+                role="option"
+                className={
+                  'nbi-claude-code-picker-session' +
+                  (isHighlighted ? ' highlighted' : '')
                 }
-              }}
-            >
-              <div className="nbi-claude-code-picker-session-top">
-                <span className="nbi-claude-code-picker-session-id">
-                  {session.session_id.slice(0, 8)}
-                </span>
-                <span className="nbi-claude-code-picker-time">
-                  {session.cwd}
-                </span>
-              </div>
-              {session.preview && (
-                <div className="nbi-claude-code-picker-msg">
-                  {session.preview}
+                tabIndex={0}
+                aria-selected={isHighlighted}
+                onClick={() => onSessionSelected(session)}
+                onFocus={() => setHighlightedIndex(index)}
+              >
+                <div className="nbi-claude-code-picker-session-top">
+                  <span className="nbi-claude-code-picker-session-id">
+                    {session.session_id.slice(0, 8)}
+                  </span>
+                  <span className="nbi-claude-code-picker-time">
+                    {session.cwd}
+                  </span>
                 </div>
-              )}
-            </div>
-          ))
+                {session.preview && (
+                  <div className="nbi-claude-code-picker-msg">
+                    {session.preview}
+                  </div>
+                )}
+              </div>
+            );
+          })
         )}
       </div>
     </div>
