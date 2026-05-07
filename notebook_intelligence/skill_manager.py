@@ -29,7 +29,7 @@ class SkillManager:
         }
         self._listeners: List[Callable[[], None]] = []
         self._listeners_lock = threading.Lock()
-        self._last_mtime: float = 0.0
+        self._last_signature: tuple = ()
         self._watcher_thread: Optional[threading.Thread] = None
         self._watcher_stop = threading.Event()
 
@@ -44,7 +44,7 @@ class SkillManager:
 
     def _notify_skills_changed(self) -> None:
         # Suppress the next watcher-driven fire so self-triggered mutations don't double-notify.
-        self._last_mtime = self._compute_mtime()
+        self._last_signature = self._compute_signature()
         with self._listeners_lock:
             listeners = list(self._listeners)
         for listener in listeners:
@@ -58,7 +58,7 @@ class SkillManager:
             return
         self._watcher_stop.clear()
         # Baseline is computed on the watcher thread to avoid blocking startup.
-        self._last_mtime = 0.0
+        self._last_signature = ()
         self._watcher_thread = threading.Thread(
             name="Skill Watcher",
             target=self._watch_loop,
@@ -74,39 +74,61 @@ class SkillManager:
         self._watcher_thread = None
 
     def _watch_loop(self) -> None:
-        self._last_mtime = self._compute_mtime()
+        self._last_signature = self._compute_signature()
         while not self._watcher_stop.wait(self.WATCH_INTERVAL_SECONDS):
-            current = self._compute_mtime()
-            if current > self._last_mtime:
-                self._last_mtime = current
+            current = self._compute_signature()
+            if current != self._last_signature:
+                self._last_signature = current
                 log.info("Skill directory change detected; notifying listeners")
                 self._notify_skills_changed()
 
-    def _compute_mtime(self) -> float:
-        """Max mtime of scope dirs, each bundle dir, and each bundle's SKILL.md.
+    def _compute_signature(self) -> tuple:
+        """Return a structural snapshot used to detect skill-content changes.
 
-        We intentionally skip walking bundle contents so large helper trees don't inflate
-        the polling cost. Bundle-internal edits still bump the bundle dir's mtime.
+        For each scope, includes the sorted bundle-name + bundle-dir mtime +
+        SKILL.md mtime triples. Crucially, this skips:
+
+        * The scope directory's own mtime — siblings like ``.DS_Store`` (macOS
+          Finder), ``.git/`` operations on a parent, or unrelated lockfiles
+          would otherwise bump the parent's mtime and trip the watcher
+          despite no actual skill change. ``#208`` was this case: launching
+          ``claude`` in a terminal touched a sibling under
+          ``~/.claude/skills/`` and the watcher fired a "Skills reloaded"
+          banner the user hadn't asked for.
+        * Hidden entries (``.git``, ``.DS_Store``, etc.) inside the scope —
+          same reasoning.
+
+        Bundle-dir mtime is preserved so helper-file edits inside a bundle
+        still register as a change. Equality (not ``>``) drives the
+        watcher's decision so renames + deletions are detected too.
         """
-        max_mtime = 0.0
-        for scope_dir in self._scope_dirs.values():
+        parts = []
+        for scope, scope_dir in sorted(self._scope_dirs.items()):
             if not scope_dir.exists():
+                parts.append((scope, ()))
                 continue
+            bundles = []
             try:
-                max_mtime = max(max_mtime, scope_dir.stat().st_mtime)
-                for entry in scope_dir.iterdir():
-                    if not entry.is_dir():
+                for entry in sorted(scope_dir.iterdir()):
+                    if not entry.is_dir() or entry.name.startswith('.'):
+                        continue
+                    skill_md = entry / SKILL_ENTRY_FILE
+                    if not skill_md.exists():
                         continue
                     try:
-                        max_mtime = max(max_mtime, entry.stat().st_mtime)
-                        skill_md = entry / SKILL_ENTRY_FILE
-                        if skill_md.exists():
-                            max_mtime = max(max_mtime, skill_md.stat().st_mtime)
+                        bundles.append(
+                            (
+                                entry.name,
+                                entry.stat().st_mtime,
+                                skill_md.stat().st_mtime,
+                            )
+                        )
                     except OSError:
                         continue
             except OSError:
-                continue
-        return max_mtime
+                pass
+            parts.append((scope, tuple(bundles)))
+        return tuple(parts)
 
     def list_skills(self) -> List[Skill]:
         skills: List[Skill] = []

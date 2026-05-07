@@ -396,10 +396,60 @@ class TestWatcher:
         manager.on_skills_changed(fired.set)
         manager.start_watching()
         try:
-            # Ensure mtime baseline is recorded before we mutate
+            # Ensure baseline is recorded before we mutate
             time.sleep(0.1)
             _write_bundle(user_dir, "external")
             assert fired.wait(timeout=2.0), "watcher did not fire on external change"
+        finally:
+            manager.stop_watching()
+
+    def test_watcher_detects_bundle_removal(self, skill_dirs):
+        # Pre-fix the watcher's ``current > _last_mtime`` check would miss
+        # removals because the surviving bundles' mtimes are older. The
+        # signature-equality compare picks them up.
+        import shutil
+
+        user_dir, project_dir = skill_dirs
+        _write_bundle(user_dir, "going-away")
+        manager = SkillManager(user_dir, project_dir)
+        manager.WATCH_INTERVAL_SECONDS = 0.05  # type: ignore[attr-defined]
+        fired = threading.Event()
+        manager.on_skills_changed(fired.set)
+        manager.start_watching()
+        try:
+            time.sleep(0.1)
+            shutil.rmtree(user_dir / "going-away")
+            assert fired.wait(timeout=2.0), "watcher did not fire on bundle removal"
+        finally:
+            manager.stop_watching()
+
+    def test_watcher_ignores_dotfile_in_scope_dir(self, skill_dirs):
+        # Regression test for #208: launching ``claude`` in a terminal
+        # touches a sibling under ``~/.claude/skills/`` (e.g. ``.DS_Store``,
+        # a logfile, or an mtime bump from the kernel) and the previous
+        # mtime-based watcher fired a spurious "Skills reloaded" banner the
+        # user hadn't asked for.
+        user_dir, project_dir = skill_dirs
+        _write_bundle(user_dir, "real-skill")
+        manager = SkillManager(user_dir, project_dir)
+        manager.WATCH_INTERVAL_SECONDS = 0.05  # type: ignore[attr-defined]
+        fired = threading.Event()
+        manager.on_skills_changed(fired.set)
+        manager.start_watching()
+        try:
+            time.sleep(0.1)
+            # Touch the scope dir's own mtime by writing a hidden sibling.
+            # This simulates Finder (.DS_Store), .git, or any other tool
+            # writing alongside skill bundles without touching the bundles
+            # themselves.
+            (user_dir / ".DS_Store").write_text("", encoding="utf-8")
+            (user_dir / ".git").mkdir(exist_ok=True)
+            # Wait for at least two watcher ticks to elapse — the spurious
+            # change would have fired by now if the dotfile bumped the
+            # signature.
+            assert not fired.wait(timeout=0.5), (
+                "watcher fired on dotfile change; this is the #208 regression"
+            )
         finally:
             manager.stop_watching()
 
