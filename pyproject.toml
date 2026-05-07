@@ -36,7 +36,7 @@ dependencies = [
 dynamic = ["version", "description", "authors", "urls", "keywords"]
 
 [project.optional-dependencies]
-test = ["pytest"]
+test = ["pytest>=7.0,<9", "pyyaml"]
 
 [tool.hatch.version]
 source = "nodejs"
