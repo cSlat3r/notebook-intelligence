@@ -21,6 +21,7 @@ export function LauncherPicker({
   const [error, setError] = useState('');
   const [filter, setFilter] = useState('');
   const [highlightedIndex, setHighlightedIndex] = useState(-1);
+  const containerRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -61,6 +62,44 @@ export function LauncherPicker({
     row?.scrollIntoView({ block: 'nearest' });
   }, [highlightedIndex]);
 
+  // Refs so the document-level keydown listener installed below can read
+  // the latest values without re-attaching on every render.
+  const filteredRef = useRef(filtered);
+  const highlightedIndexRef = useRef(highlightedIndex);
+  const onSessionSelectedRef = useRef(onSessionSelected);
+  filteredRef.current = filtered;
+  highlightedIndexRef.current = highlightedIndex;
+  onSessionSelectedRef.current = onSessionSelected;
+
+  // Lumino's Dialog catches Enter at capture phase on the dialog node and
+  // triggers its default OK button (the "New Session" button), so a React
+  // bubble-phase handler never sees Enter inside the picker. Attach a
+  // document-capture listener here so we beat the dialog and activate the
+  // highlighted row instead — falling through to the dialog's New Session
+  // path only when there's nothing selectable to land on.
+  useEffect(() => {
+    const handler = (e: globalThis.KeyboardEvent) => {
+      if (e.key !== 'Enter') {
+        return;
+      }
+      const node = containerRef.current;
+      if (!node || !node.contains(e.target as Node)) {
+        return;
+      }
+      const list = filteredRef.current;
+      if (list.length === 0) {
+        return;
+      }
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      const idx = highlightedIndexRef.current;
+      onSessionSelectedRef.current(list[idx >= 0 ? idx : 0]);
+    };
+    document.addEventListener('keydown', handler, { capture: true });
+    return () =>
+      document.removeEventListener('keydown', handler, { capture: true });
+  }, []);
+
   const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     if (filtered.length === 0) {
       return;
@@ -74,9 +113,6 @@ export function LauncherPicker({
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
       setHighlightedIndex(i => (i <= 0 ? filtered.length - 1 : i - 1));
-    } else if (e.key === 'Enter' && highlightedIndex >= 0) {
-      e.preventDefault();
-      onSessionSelected(filtered[highlightedIndex]);
     }
   };
 
@@ -99,7 +135,11 @@ export function LauncherPicker({
       ? `nbi-claude-session-row-${filtered[highlightedIndex].session_id}`
       : undefined;
   return (
-    <div className="nbi-claude-code-picker-body" onKeyDown={handleKeyDown}>
+    <div
+      className="nbi-claude-code-picker-body"
+      ref={containerRef}
+      onKeyDown={handleKeyDown}
+    >
       <input
         className="nbi-claude-code-picker-search"
         type="text"
@@ -141,15 +181,7 @@ export function LauncherPicker({
                 tabIndex={0}
                 aria-selected={isHighlighted}
                 onClick={() => onSessionSelected(session)}
-                onKeyDown={(e: KeyboardEvent) => {
-                  // Activates the row when it's directly Tab-focused;
-                  // arrow-key navigation handles activation through the
-                  // parent handler instead.
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    onSessionSelected(session);
-                  }
-                }}
+                onFocus={() => setHighlightedIndex(index)}
               >
                 <div className="nbi-claude-code-picker-session-top">
                   <span className="nbi-claude-code-picker-session-id">
