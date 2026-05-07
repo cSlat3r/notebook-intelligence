@@ -42,9 +42,7 @@ _PREVIEW_MAX_CHARS = 160
 _MAX_LINES_SCANNED = 200
 
 # Skip filter shared by the chat-sidebar picker and the launcher tile so
-# they can't disagree on what to show for the same session id. New
-# patterns spotted in the wild (e.g. "Unknown skill:") are tracked in
-# issue #186.
+# they can't disagree on what to show for the same session id.
 NBI_CONTEXT_PREFIX = "Additional context: Current directory open in Jupyter is:"
 # A user prompt that genuinely starts with one of these prefixes (e.g.
 # "what does <command-name> do?") would be skipped in favor of the next
@@ -55,6 +53,7 @@ _SKIPPABLE_PREFIXES = (
     "<command-",
     "[Request interrupted by user",
     "Unknown slash command:",
+    "Unknown skill:",
 )
 # Control-only slash commands the user typed to manage the session itself
 # rather than ask Claude something. A regex like ^/[A-Za-z]+$ would also
