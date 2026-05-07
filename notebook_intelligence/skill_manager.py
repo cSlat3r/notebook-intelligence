@@ -2,7 +2,7 @@ import logging
 import shutil
 import threading
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, Iterator, List, Optional
 
 from notebook_intelligence.skillset import (
     SKILL_ENTRY_FILE,
@@ -82,6 +82,26 @@ class SkillManager:
                 log.info("Skill directory change detected; notifying listeners")
                 self._notify_skills_changed()
 
+    def _iter_bundle_dirs(self, scope_dir: Path) -> Iterator[Path]:
+        """Yield bundle dirs (each containing a SKILL.md) inside ``scope_dir``.
+
+        Hidden entries (``.git``, ``.DS_Store``, etc.) are skipped — see
+        ``_compute_signature`` for why this matters for change detection.
+        Errors from ``iterdir`` are swallowed so a transient FS hiccup
+        doesn't tear down the watcher thread.
+        """
+        if not scope_dir.exists():
+            return
+        try:
+            entries = sorted(scope_dir.iterdir())
+        except OSError:
+            return
+        for entry in entries:
+            if not entry.is_dir() or entry.name.startswith('.'):
+                continue
+            if (entry / SKILL_ENTRY_FILE).exists():
+                yield entry
+
     def _compute_signature(self) -> tuple:
         """Return a structural snapshot used to detect skill-content changes.
 
@@ -104,51 +124,31 @@ class SkillManager:
         """
         parts = []
         for scope, scope_dir in sorted(self._scope_dirs.items()):
-            if not scope_dir.exists():
-                parts.append((scope, ()))
-                continue
             bundles = []
-            try:
-                for entry in sorted(scope_dir.iterdir()):
-                    if not entry.is_dir() or entry.name.startswith('.'):
-                        continue
-                    skill_md = entry / SKILL_ENTRY_FILE
-                    if not skill_md.exists():
-                        continue
-                    try:
-                        bundles.append(
-                            (
-                                entry.name,
-                                entry.stat().st_mtime,
-                                skill_md.stat().st_mtime,
-                            )
+            for entry in self._iter_bundle_dirs(scope_dir):
+                try:
+                    bundles.append(
+                        (
+                            entry.name,
+                            entry.stat().st_mtime,
+                            (entry / SKILL_ENTRY_FILE).stat().st_mtime,
                         )
-                    except OSError:
-                        continue
-            except OSError:
-                pass
+                    )
+                except OSError:
+                    continue
             parts.append((scope, tuple(bundles)))
         return tuple(parts)
 
     def list_skills(self) -> List[Skill]:
         skills: List[Skill] = []
         for scope, scope_dir in self._scope_dirs.items():
-            if not scope_dir.exists():
-                continue
-            skills.extend(self._discover_scope(scope, scope_dir))
+            for entry in self._iter_bundle_dirs(scope_dir):
+                try:
+                    skills.append(Skill.from_path(entry, scope))
+                except Exception as e:
+                    log.error(f"Failed to load skill from {entry}: {e}")
         skills.sort(key=lambda s: (s.scope, s.name))
         return skills
-
-    def _discover_scope(self, scope: SkillScope, scope_dir: Path) -> List[Skill]:
-        results: List[Skill] = []
-        for entry in sorted(scope_dir.iterdir()):
-            if not (entry.is_dir() and (entry / SKILL_ENTRY_FILE).exists()):
-                continue
-            try:
-                results.append(Skill.from_path(entry, scope))
-            except Exception as e:
-                log.error(f"Failed to load skill from {entry}: {e}")
-        return results
 
     def _locate_skill_path(self, scope: SkillScope, name: str) -> Optional[Path]:
         """Return the bundle dir for a skill, or None if it doesn't exist."""
