@@ -96,11 +96,13 @@ class Signal:
     def disconnect(self, listener: Callable) -> None:
         # `list.remove` raises ``ValueError`` on a missing entry; tolerating
         # double-disconnect avoids crashing the chat loop when a misbehaving
-        # plugin disconnects twice or after a crash recovery.
+        # plugin disconnects twice or after a crash recovery. Surfaced at
+        # DEBUG so a real plugin bug can still be diagnosed if the noise
+        # ever matters.
         try:
             self._listeners.remove(listener)
         except ValueError:
-            pass
+            log.debug("Signal.disconnect: listener %r was not connected", listener)
 
 class SignalImpl(Signal):
     def __init__(self):

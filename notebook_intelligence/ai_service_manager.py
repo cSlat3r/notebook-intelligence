@@ -43,13 +43,13 @@ class PromptParts:
     mcp_arguments: dict = None
 
 class AIServiceManager(Host):
-    def __init__(self, options: dict = {}):
+    def __init__(self, options: Optional[dict] = None):
         self.llm_providers: Dict[str, LLMProvider] = {}
         self.chat_participants: Dict[str, ChatParticipant] = {}
         self.completion_context_providers: Dict[str, CompletionContextProvider] = {}
         self.telemetry_listeners: Dict[str, TelemetryListener] = {}
         self._extension_toolsets: Dict[str, list[Toolset]] = {}
-        self._options = options.copy()
+        self._options = dict(options) if options is not None else {}
         self._nbi_config = NBIConfig({"server_root_dir": self._options.get('server_root_dir', '')})
         # Apply admin policies before any consumer (model bootstrap, MCP
         # connect, login_with_existing_credentials) reads claude_settings or
@@ -129,7 +129,13 @@ class AIServiceManager(Host):
         self.register_llm_provider(self._ollama_llm_provider)
         self._mcp_manager = MCPManager(self.nbi_config.mcp)
         for participant in self._mcp_manager.get_mcp_participants():
-            self.register_chat_participant(participant)
+            # A duplicate / reserved id from one MCP server should not block
+            # the rest from registering — log and continue rather than crash
+            # the extension's boot sequence.
+            try:
+                self.register_chat_participant(participant)
+            except RegistrationError as e:
+                log.error(f"Skipping MCP chat participant: {e}")
 
         self.update_models_from_config()
         self.initialize_extensions()
