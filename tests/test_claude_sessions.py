@@ -618,6 +618,7 @@ class TestListAllSessions:
             "<command-name>/clear</command-name>",
             "[Request interrupted by user for tool use]",
             "Unknown slash command: clear",
+            "Unknown skill: clear",
             "/exit",
         ],
         ids=[
@@ -626,6 +627,7 @@ class TestListAllSessions:
             "command_envelope",
             "request_interrupted",
             "unknown_slash_echo",
+            "unknown_skill_echo",
             "control_verb",
         ],
     )
