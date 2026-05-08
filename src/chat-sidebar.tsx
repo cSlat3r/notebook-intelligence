@@ -660,7 +660,7 @@ function ChatResponse(props: any) {
           </div>
           <div
             className="chat-message-from-progress"
-            style={{ display: `${props.showGenerating ? 'visible' : 'none'}` }}
+            style={{ display: `${props.showGenerating ? 'block' : 'none'}` }}
           >
             <div className="loading-ellipsis">Generating</div>
           </div>
@@ -3102,6 +3102,12 @@ function SidebarComponent(props: any) {
                   <div className="loading-ellipsis">Uploading</div>
                 </div>
               )}
+            </div>
+          )}
+          {copilotRequestInProgress && (
+            <div className="inline-generating-indicator">
+              <div className="floating-indicator-pulse"></div>
+              <div className="loading-ellipsis">Generating</div>
             </div>
           )}
           <div className="user-input-footer">
