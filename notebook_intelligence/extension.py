@@ -43,8 +43,8 @@ from notebook_intelligence.feature_flags import (
 from notebook_intelligence.claude import ClaudeCodeChatParticipant, fetch_claude_models
 from notebook_intelligence.claude_sessions import (
     NBI_CONTEXT_PREFIX,
+    get_sessions_dir as get_claude_sessions_dir,
     list_all_sessions as list_all_claude_sessions,
-    list_sessions as list_claude_sessions,
 )
 import notebook_intelligence.github_copilot as github_copilot
 from notebook_intelligence.built_in_toolsets import built_in_toolsets
@@ -361,6 +361,8 @@ class GetCapabilitiesHandler(APIHandler):
                 nbi_config.claude_settings, self.string_overrides
             ),
             "claude_models": ai_service_manager.claude_models,
+            # Drives launcher-tile visibility (issue #183).
+            "claude_cli_available": shutil.which("claude") is not None,
             "default_chat_mode": nbi_config.default_chat_mode,
             "chat_feedback_enabled": self.enable_chat_feedback,
             "cell_output_features": _build_cell_output_features_response(
@@ -949,7 +951,22 @@ class FileUploadHandler(APIHandler):
 
 
 class ClaudeSessionsListHandler(APIHandler):
-    """Lists prior Claude Code sessions for the current Jupyter working dir."""
+    """Lists Claude Code sessions for both pickers.
+
+    Both pickers (chat sidebar and launcher tile) consume this endpoint
+    via the same ``list_all_sessions`` backend so they cannot disagree on
+    previews. ``?scope=cwd`` filters the response down to sessions whose
+    transcript lives under the current Jupyter cwd (the chat sidebar
+    case); ``?scope=all`` (the default) returns every project's sessions
+    (the launcher tile case).
+
+    ``current_cwd`` is the realpath-resolved Jupyter root the chat picker
+    pairs with the session id to render ``cd ... && claude --resume <id>``.
+
+    Guarded by ``is_claude_code_mode`` because both consumers are
+    Claude-Code-specific surfaces — the launcher tile literally launches
+    the ``claude`` CLI in a terminal.
+    """
 
     @tornado.web.authenticated
     def get(self):
@@ -958,35 +975,21 @@ class ClaudeSessionsListHandler(APIHandler):
             self.finish(json.dumps({"error": "Claude Code mode is not enabled"}))
             return
 
+        scope = self.get_query_argument("scope", "all")
         try:
             cwd = get_jupyter_root_dir()
-            sessions = list_claude_sessions(cwd)
-            # `claude --resume <id>` is cwd-scoped — it looks up the
-            # transcript under the encoded form of the user's CURRENT shell
-            # cwd. Surface the resolved JupyterLab root so the frontend can
-            # paste a `cd ... && claude --resume <id>` command that works
-            # regardless of where the user's terminal happens to be.
+            sessions = list_all_claude_sessions(cwd=cwd)
+            if scope == "cwd" and cwd:
+                target = str(get_claude_sessions_dir(cwd))
+                sessions = [
+                    s for s in sessions if os.path.dirname(s.path) == target
+                ]
             self.finish(json.dumps({
                 "sessions": [asdict(s) for s in sessions],
-                "cwd": os.path.realpath(cwd) if cwd else "",
+                "current_cwd": os.path.realpath(cwd) if cwd else "",
             }))
         except Exception as e:
             log.exception("Failed to list Claude sessions")
-            self.set_status(500)
-            self.finish(json.dumps({"error": str(e)}))
-
-class ClaudeSessionsAllHandler(APIHandler):
-    """Lists all Claude Code sessions across all projects via history.jsonl."""
-
-    @tornado.web.authenticated
-    def get(self):
-        try:
-            sessions = list_all_claude_sessions(cwd=get_jupyter_root_dir())
-            self.finish(json.dumps({
-                "sessions": [asdict(s) for s in sessions],
-            }))
-        except Exception as e:
-            log.exception("Failed to list all Claude sessions")
             self.set_status(500)
             self.finish(json.dumps({"error": str(e)}))
 
@@ -1600,11 +1603,11 @@ class NotebookIntelligence(ExtensionApp):
     root_dir = ''
 
     disabled_providers = List(
-        trait=Unicode,
+        trait=Unicode(),
         default_value=None,
         help="""
         List of LLM providers to disable. Valid provider IDs: github-copilot, openai-compatible, litellm-compatible, ollama.
-        
+
         Example: ['ollama', 'litellm-compatible']
         """,
         allow_none=True,
@@ -1621,7 +1624,7 @@ class NotebookIntelligence(ExtensionApp):
     )
 
     disabled_tools = List(
-        trait=Unicode,
+        trait=Unicode(),
         default_value=None,
         help="""
         List of built-in tools to disable. Valid tool names: nbi-notebook-edit, nbi-notebook-execute, nbi-python-file-edit, nbi-file-edit, nbi-file-read, nbi-command-execute.
@@ -1894,7 +1897,6 @@ class NotebookIntelligence(ExtensionApp):
         route_pattern_skill_bundle_file_rename = url_path_join(base_url, "notebook-intelligence", "skills", r"(user|project)", skill_name, "files", "rename")
         route_pattern_upload_file = url_path_join(base_url, "notebook-intelligence", "upload-file")
         route_pattern_claude_sessions = url_path_join(base_url, "notebook-intelligence", "claude-sessions")
-        route_pattern_claude_sessions_all = url_path_join(base_url, "notebook-intelligence", "claude-sessions", "all")
         route_pattern_claude_sessions_resume = url_path_join(base_url, "notebook-intelligence", "claude-sessions", "resume")
         GetCapabilitiesHandler.disabled_tools = self.disabled_tools
         GetCapabilitiesHandler.allow_enabling_tools_with_env = self.allow_enabling_tools_with_env
@@ -1929,7 +1931,6 @@ class NotebookIntelligence(ExtensionApp):
             (route_pattern_skill_detail, SkillDetailHandler),
             (route_pattern_upload_file, FileUploadHandler),
             (route_pattern_claude_sessions_resume, ClaudeSessionsResumeHandler),
-            (route_pattern_claude_sessions_all, ClaudeSessionsAllHandler),
             (route_pattern_claude_sessions, ClaudeSessionsListHandler),
             (route_pattern_copilot, WebsocketCopilotHandler),
         ]

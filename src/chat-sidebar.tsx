@@ -1033,6 +1033,8 @@ function SidebarComponent(props: any) {
   const [selectedPrefixSuggestionIndex, setSelectedPrefixSuggestionIndex] =
     useState(0);
   const promptInputRef = useRef<HTMLTextAreaElement>(null);
+  const autocompleteRef = useRef<HTMLDivElement>(null);
+  const atButtonRef = useRef<HTMLAnchorElement>(null);
   const [promptHistory, setPromptHistory] = useState<string[]>([]);
   // position on prompt history stack
   const [promptHistoryIndex, setPromptHistoryIndex] = useState(0);
@@ -1930,6 +1932,23 @@ function SidebarComponent(props: any) {
     setSelectedPrefixSuggestionIndex(0);
   }, [prefixSuggestions]);
 
+  useEffect(() => {
+    if (!showPopover) {
+      return;
+    }
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        !autocompleteRef.current?.contains(event.target as Node) &&
+        !promptInputRef.current?.contains(event.target as Node) &&
+        !atButtonRef.current?.contains(event.target as Node)
+      ) {
+        setShowPopover(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showPopover]);
+
   const onPromptChange = (event: ChangeEvent<HTMLTextAreaElement>) => {
     const newPrompt = event.target.value;
     setPrompt(newPrompt);
@@ -1937,11 +1956,7 @@ function SidebarComponent(props: any) {
     if (trimmedPrompt === '@' || trimmedPrompt === '/') {
       setShowPopover(true);
       filterPrefixSuggestions(trimmedPrompt);
-    } else if (
-      trimmedPrompt.startsWith('@') ||
-      trimmedPrompt.startsWith('/') ||
-      trimmedPrompt === ''
-    ) {
+    } else if (trimmedPrompt.startsWith('@') || trimmedPrompt.startsWith('/')) {
       filterPrefixSuggestions(trimmedPrompt);
     } else {
       setShowPopover(false);
@@ -3115,8 +3130,9 @@ function SidebarComponent(props: any) {
               <div>
                 <a
                   href="javascript:void(0)"
+                  ref={atButtonRef}
                   onClick={() => {
-                    setShowPopover(true);
+                    setShowPopover(prev => !prev);
                     promptInputRef.current?.focus();
                   }}
                   title="Select chat participant"
@@ -3203,7 +3219,7 @@ function SidebarComponent(props: any) {
             </div>
           </div>
           {showPopover && prefixSuggestions.length > 0 && (
-            <div className="user-input-autocomplete">
+            <div className="user-input-autocomplete" ref={autocompleteRef}>
               {prefixSuggestions.map((prefix, index) => (
                 <div
                   key={`key-${index}`}

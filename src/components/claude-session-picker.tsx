@@ -39,7 +39,7 @@ export function ClaudeSessionPicker(
   props: IClaudeSessionPickerProps
 ): JSX.Element {
   const [sessions, setSessions] = useState<IClaudeSessionInfo[]>([]);
-  const [cwd, setCwd] = useState('');
+  const [currentCwd, setCurrentCwd] = useState('');
   const [loading, setLoading] = useState(true);
   const [resuming, setResuming] = useState(false);
   const [error, setError] = useState('');
@@ -59,14 +59,15 @@ export function ClaudeSessionPicker(
 
   useEffect(() => {
     let cancelled = false;
-    const fetch = props.fetchSessions ?? (() => NBIAPI.listClaudeSessions());
+    const fetch =
+      props.fetchSessions ?? (() => NBIAPI.listClaudeSessions('cwd'));
     fetch()
       .then(result => {
         if (cancelled) {
           return;
         }
         setSessions(result.sessions);
-        setCwd(result.cwd);
+        setCurrentCwd(result.currentCwd);
         setLoading(false);
       })
       .catch(reason => {
@@ -88,7 +89,7 @@ export function ClaudeSessionPicker(
     event.stopPropagation();
     event.preventDefault();
     const ok = await writeTextToClipboard(
-      buildResumeCommand(cwd, session.session_id)
+      buildResumeCommand(currentCwd, session.session_id)
     );
     setCopyFeedback({
       sessionId: session.session_id,
@@ -177,12 +178,13 @@ export function ClaudeSessionPicker(
                   className={`claude-session-picker-item${resuming ? ' busy' : ''}`}
                   onClick={() => handleResume(session)}
                 >
-                  <div className="claude-session-picker-item-preview">
-                    {session.preview || '(no preview available)'}
-                  </div>
+                  {session.preview && (
+                    <div className="claude-session-picker-item-preview">
+                      {session.preview}
+                    </div>
+                  )}
                   <div className="claude-session-picker-item-meta">
                     <span>{formatTimestamp(session.modified_at)}</span>
-                    <span>&middot;</span>
                     <span
                       className="claude-session-picker-item-id"
                       title={session.session_id}

@@ -715,6 +715,7 @@ pre:has(.code-block-header) {
 /* Claude Code session picker (used inside Dialog from launcher tile) */
 .nbi-claude-code-picker {
   min-width: 480px;
+  height: 400px;
 }
 
 .nbi-claude-code-picker-body {
@@ -722,7 +723,7 @@ pre:has(.code-block-header) {
   flex-direction: column;
   gap: 0;
   width: 500px;
-  height: 400px;
+  height: 100%;
 }
 
 .nbi-claude-code-picker-search {
@@ -792,7 +793,8 @@ pre:has(.code-block-header) {
 }
 
 .nbi-claude-code-picker-session:hover,
-.nbi-claude-code-picker-session:focus {
+.nbi-claude-code-picker-session:focus,
+.nbi-claude-code-picker-session.highlighted {
   border-color: var(--jp-brand-color1);
   outline: none;
 }
@@ -2252,6 +2254,8 @@ svg.access-token-warning {
 }
 
 .claude-session-picker-item-id {
+  flex-grow: 1;
+  text-align: right;
   font-family: var(--jp-code-font-family);
 }
 
@@ -2470,11 +2474,13 @@ svg.access-token-warning {
 }
 
 @keyframes border-pulse {
-  0%, 100% {
-    box-shadow: 0 0 0 rgba(241, 37, 156, 0);
+  0%,
+  100% {
+    box-shadow: 0 0 0 rgb(241 37 156 / 0%);
   }
+
   50% {
-    box-shadow: 0 0 15px rgba(241, 37, 156, 0.5);
+    box-shadow: 0 0 15px rgb(241 37 156 / 50%);
   }
 }
 
@@ -2498,10 +2504,12 @@ svg.access-token-warning {
 }
 
 @keyframes pulse-glow {
-  0%, 100% {
+  0%,
+  100% {
     opacity: 1;
     transform: scale(1);
   }
+
   50% {
     opacity: 0.5;
     transform: scale(1.3);

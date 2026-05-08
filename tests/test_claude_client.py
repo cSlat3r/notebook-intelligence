@@ -421,6 +421,13 @@ class TestConnectWaitsForReadiness:
 
         # Well under the 5s timeout — the except branch signals promptly.
         assert elapsed < 2
+        # ``is_connected`` checks ``Thread.is_alive``; the worker signals
+        # ``_connect_resolved`` from its except branch *before* the
+        # coroutine returns, so on slow runners the thread can briefly
+        # report alive while the spawn-failure unwinds. Wait for it to
+        # actually exit before asserting on liveness.
+        if client._client_thread is not None:
+            client._client_thread.join(timeout=2)
         assert not client.is_connected()
         assert client._status == ClaudeAgentClientStatus.FailedToConnect
         # No server-info fetch when the handshake failed.
